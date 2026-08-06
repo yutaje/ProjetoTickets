@@ -14,6 +14,15 @@ Base.metadata.create_all(bind=engine)
 app = FastAPI(title="FlowPulse API")
 
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
 origins = [
     "http://localhost:3000", 
     "http://localhost:5173", 
