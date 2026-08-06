@@ -18,6 +18,9 @@ class ProjectUpdate(BaseModel):
 
 class ProjectResponse(ProjectBase):
     id: int
+    name: str
+    description: Optional[str] = None
+    team_id: Optional[int] = None
 
     class Config:
         from_attributes = True

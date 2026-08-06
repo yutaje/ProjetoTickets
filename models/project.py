@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text
+from sqlalchemy import Column, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import relationship
 from database import Base
 
@@ -9,6 +9,7 @@ class Project(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(150), nullable=False, index=True)
     description = Column(Text, nullable=True)
+    team_id = Column(Integer, ForeignKey("teams.id"), nullable=True)
 
 
     #relacao

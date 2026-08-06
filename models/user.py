@@ -16,5 +16,5 @@ class User(Base):
 
 
     #relacoes
-    tickets_assigned = relationship("Ticket", back_populates="assignee", foreign_keys="Ticket.assigned_to")
+    tickets = relationship("Ticket", back_populates="assignee", foreign_keys="[Ticket.assigned_to_id]")
     comments = relationship("Comment", back_populates="author")

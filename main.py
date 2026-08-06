@@ -1,6 +1,8 @@
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from database import Base, engine
+from core.security import get_current_user
+from core.security import get_current_user
+from database import Base, engine, get_db
 from models.user import User
 from models.project import Project
 from models.ticket import Ticket
@@ -49,3 +51,12 @@ app.include_router(team.router)
 @app.get("/")
 def home():
     return {"mensagem": "O backend do FlowPulse está oficialmente online, bro!"}
+
+
+from models.user import User
+from schemas.user import UserResponse # ou o teu schema correspondente
+from typing import List
+
+@app.get("/users/")
+def get_all_users(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    return db.query(User).all()
