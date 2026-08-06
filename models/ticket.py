@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, ForeignKey
+from sqlalchemy import Column, Integer, String, Text, ForeignKey, DateTime
 from sqlalchemy.orm import relationship
 from database import Base
 
@@ -9,6 +9,11 @@ class Ticket(Base):
     title = Column(String(150), nullable=False)
     description = Column(Text, nullable=True)
     status = Column(String(50), default="To Do")
+
+
+    priority = Column(String(50), default="Média")
+    deadline = Column(DateTime, nullable=True)
+
     
     project_id = Column(Integer, ForeignKey("projects.id"), nullable=False)
     assigned_to = Column(Integer, ForeignKey("users.id"), nullable=True)
