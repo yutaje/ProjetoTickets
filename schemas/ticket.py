@@ -1,45 +1,39 @@
 from pydantic import BaseModel
 from typing import Optional
-from datetime import datetime
+from datetime import date
 
 
-class TicketBase(BaseModel):
+class TicketCreate(BaseModel):
     title: str
     description: Optional[str] = None
-    status: str = "To Do"
     priority: str = "Média"
-    deadline: Optional[datetime] = None
+    status: str = "To Do"
     project_id: int
-    assigned_to: Optional[int] = None
     estimated_hours: Optional[float] = 0.0
-    tracked_hours: Optional[float] = 0.0
-
-
-class TicketCreate(TicketBase):
-    pass
+    due_date: Optional[date] = None  
 
 
 class TicketUpdate(BaseModel):
     title: Optional[str] = None
     description: Optional[str] = None
-    status: Optional[str] = None
     priority: Optional[str] = None
-    deadline: Optional[datetime] = None
+    status: Optional[str] = None
     project_id: Optional[int] = None
-    assigned_to: Optional[int] = None
     estimated_hours: Optional[float] = None
     tracked_hours: Optional[float] = None
+    due_date: Optional[date] = None 
 
 
-class TicketResponse(TicketBase):
+class TicketResponse(BaseModel):
     id: int
     title: str
-    description: Optional[str]
+    description: Optional[str] = None
+    priority: str
     status: str
-    priority: str                       
-    deadline: Optional[datetime]        
+    estimated_hours: Optional[float] = 0.0
+    tracked_hours: Optional[float] = 0.0
+    due_date: Optional[date] = None  
     project_id: int
-    assigned_to: Optional[int]
 
     class Config:
-        from_attributes = True
+        orm_mode = True

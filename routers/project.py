@@ -1,10 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from database import get_db
 from models.project import Project
 from models.user import User
 from schemas.project import ProjectCreate, ProjectResponse
-from core.security import get_current_user, require_manager
+from core.security import get_current_user, require_manager_or_admin
 from typing import List
 
 router = APIRouter(
@@ -12,12 +12,12 @@ router = APIRouter(
     tags=["Projects"]
 )
 
-#criar um proj
-@router.post("/", response_model=ProjectResponse)
+# Criar um projeto (Permitido a Managers e Admins)
+@router.post("/", response_model=ProjectResponse, status_code=status.HTTP_201_CREATED)
 def create_project(
     project: ProjectCreate, 
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_manager)
+    current_user: User = Depends(require_manager_or_admin)
 ):
     db_project = Project(
         name=project.name,
@@ -28,7 +28,7 @@ def create_project(
     db.refresh(db_project)
     return db_project
 
-#listar os projs
+# Listar os projetos (Disponível para todos os autenticados)
 @router.get("/", response_model=List[ProjectResponse])
 def get_projects(
     db: Session = Depends(get_db),

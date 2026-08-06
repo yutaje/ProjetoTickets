@@ -34,14 +34,29 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
         
     return user
 
-def require_manager(current_user: User = Depends(get_current_user)):
-    """
-    Verifica se o utilizador autenticado tem a role de Manager.
-    Se não tiver, bloqueia o acesso com um erro 403 (Forbidden).
-    """
-    if current_user.role != "Manager":
+def require_manager_or_admin(current_user: User = Depends(get_current_user)):
+    # IMPRIME NO TERMINAL DO BACKEND O QUE ESTÁ A VIR DA BD
+    print(f"--- DEBUG PERMISSÕES ---")
+    print(f"Utilizador: {current_user.email}")
+    print(f"Role exata na BD: '{current_user.role}' (Tipo: {type(current_user.role)})")
+    
+    user_role = str(current_user.role).strip().capitalize()
+    
+    if user_role not in ["Manager", "Admin"]:
+        print(f"BLOQUEADO! Role normalizada '{user_role}' não é Manager nem Admin.")
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Acesso negado. Apenas os Managers podem realizar esta ação."
+            detail=f"Acesso negado. A tua role detetada foi: '{current_user.role}'"
+        )
+    
+    print(f"AUTORIZADO!")
+    return current_user
+
+def require_admin(current_user: User = Depends(get_current_user)):
+    user_role = str(current_user.role).strip().capitalize()
+    if user_role != "Admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Acesso restrito exclusivamente a Admins."
         )
     return current_user

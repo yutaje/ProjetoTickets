@@ -30,7 +30,6 @@ def create_access_token(data: dict):
 
 @router.post("/login")
 def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
-    
     user = db.query(User).filter(User.email == form_data.username).first()
     if not user:
         raise HTTPException(status_code=400, detail="Credenciais inválidas (Email incorreto)")

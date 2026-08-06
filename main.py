@@ -4,7 +4,7 @@ from database import Base, engine
 from models.user import User
 from models.project import Project
 from models.ticket import Ticket
-from routers import user, project, ticket, auth
+from routers import user, project, ticket, auth, team
 from models.comment import Comment
 
 
@@ -43,6 +43,7 @@ app.include_router(auth.router)
 app.include_router(user.router)
 app.include_router(project.router)
 app.include_router(ticket.router)
+app.include_router(team.router)
 
 
 @app.get("/")

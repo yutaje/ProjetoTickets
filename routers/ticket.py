@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import List
+from core.security import get_current_user
 from database import get_db
 from models.ticket import Ticket
 from models.comment import Comment
@@ -17,8 +18,20 @@ def get_tickets(db: Session = Depends(get_db)):
 
 
 @router.post("/", response_model=TicketResponse, status_code=status.HTTP_201_CREATED)
-def create_ticket(ticket: TicketCreate, db: Session = Depends(get_db)):
-    db_ticket = Ticket(**ticket.dict())
+def create_ticket(
+    ticket: TicketCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    db_ticket = Ticket(
+        title=ticket.title,
+        description=ticket.description,
+        priority=ticket.priority,
+        status=ticket.status,
+        project_id=ticket.project_id,
+        estimated_hours=ticket.estimated_hours,
+        due_date=ticket.due_date  # <-- Grava na BD
+    )
     db.add(db_ticket)
     db.commit()
     db.refresh(db_ticket)
@@ -26,15 +39,20 @@ def create_ticket(ticket: TicketCreate, db: Session = Depends(get_db)):
 
 
 @router.put("/{ticket_id}", response_model=TicketResponse)
-def update_ticket(ticket_id: int, ticket_update: TicketUpdate, db: Session = Depends(get_db)):
+def update_ticket(
+    ticket_id: int,
+    ticket_update: TicketUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
     db_ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
     if not db_ticket:
-        raise HTTPException(status_code=404, detail="Ticket não encontrado")
-    
+        raise HTTPException(status_code=404, detail="Tarefa não encontrada")
+
     update_data = ticket_update.dict(exclude_unset=True)
     for key, value in update_data.items():
         setattr(db_ticket, key, value)
-        
+
     db.commit()
     db.refresh(db_ticket)
     return db_ticket
