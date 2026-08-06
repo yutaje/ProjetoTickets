@@ -2,16 +2,19 @@ from pydantic import BaseModel
 from datetime import datetime
 
 
-class CommentCreate(BaseModel):
+class CommentBase(BaseModel):
     text: str
 
 
-class CommentResponse(BaseModel):
+class CommentCreate(CommentBase):
+    pass
+
+
+class CommentResponse(CommentBase):
     id: int
-    text: str
-    created_at: datetime
     ticket_id: int
     author_id: int
+    created_at: datetime
 
     class Config:
         from_attributes = True
