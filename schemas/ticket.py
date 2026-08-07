@@ -11,6 +11,7 @@ class TicketCreate(BaseModel):
     assigned_to_id: Optional[int] = None
     estimated_hours: Optional[float] = 0.0
     due_date: Optional[datetime] = None
+    is_running: Optional[bool] = False
 
 class TicketUpdate(BaseModel):
     title: Optional[str] = None
@@ -22,6 +23,8 @@ class TicketUpdate(BaseModel):
     estimated_hours: Optional[float] = None
     tracked_hours: Optional[float] = None
     due_date: Optional[datetime] = None
+    is_running: Optional[bool] = None
+    session_hours: Optional[float] = None  
 
 class TicketResponse(BaseModel):
     id: int
@@ -34,6 +37,7 @@ class TicketResponse(BaseModel):
     estimated_hours: float
     tracked_hours: float
     due_date: Optional[datetime] = None
+    is_running: Optional[bool] = False
 
     class Config:
         from_attributes = True

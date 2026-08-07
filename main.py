@@ -8,6 +8,7 @@ from models.project import Project
 from models.ticket import Ticket
 from routers import user, project, ticket, auth, team
 from models.comment import Comment
+from models.worklog import WorkLog
 
 
 Base.metadata.create_all(bind=engine)
