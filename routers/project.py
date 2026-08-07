@@ -19,7 +19,7 @@ def create_project(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_manager_or_admin)
 ):
-    # 1. Cria o projeto
+    #cria o projeto
     db_project = Project(
         name=project.name,
         description=project.description,
@@ -62,7 +62,7 @@ def update_project(
     db_proj.team_id = project_update.team_id
     db.commit()
     
-    # 2. Atualizar as tarefas: as que já não estão na lista perdem o projeto (ficam a Null)
+    #atualiza as tarefas
     current_tickets = db.query(Ticket).filter(Ticket.project_id == project_id).all()
     for t in current_tickets:
         if project_update.ticket_ids is not None and t.id not in project_update.ticket_ids:

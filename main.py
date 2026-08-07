@@ -6,9 +6,10 @@ from database import Base, engine, get_db
 from models.user import User
 from models.project import Project
 from models.ticket import Ticket
-from routers import user, project, ticket, auth, team
+from routers import audit, notification, report, user, project, ticket, auth, team
 from models.comment import Comment
 from models.worklog import WorkLog
+from sqlalchemy.orm import Session
 
 
 Base.metadata.create_all(bind=engine)
@@ -47,6 +48,9 @@ app.include_router(user.router)
 app.include_router(project.router)
 app.include_router(ticket.router)
 app.include_router(team.router)
+app.include_router(notification.router)  
+app.include_router(report.router)
+app.include_router(audit.router)
 
 
 @app.get("/")

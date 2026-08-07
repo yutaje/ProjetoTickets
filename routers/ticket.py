@@ -3,16 +3,48 @@ from sqlalchemy.orm import Session
 from database import get_db
 from models.ticket import Ticket
 from models.user import User
+from models.worklog import WorkLog
+from models.project import Project
+from models.team import Team
 from schemas.ticket import TicketCreate, TicketUpdate, TicketResponse
 from core.security import get_current_user
 from typing import List, Optional
 from datetime import date
-from models.worklog import WorkLog
 
 router = APIRouter(
     prefix="/tickets",
     tags=["Tickets"]
 )
+
+# --- MIDDLEWARE DE SEGURANÇA INTERNO ---
+def filter_tickets_by_permissions(query, current_user: User, db: Session):
+    """
+    Filtra a query de base de dados consoante os acessos da conta.
+    - Admin: Vê toda a base de dados.
+    - Manager / Member: Vê tarefas atribuídas a si + tarefas de projetos das suas equipas + projetos sem equipa.
+    """
+    role = getattr(current_user, "role", "Member")
+    
+    if role == "Admin":
+        return query
+        
+    # 1. Obter os IDs das equipas onde o utilizador é Líder OU Membro
+    user_teams = db.query(Team.id).filter(
+        (Team.owner_id == current_user.id) | 
+        (Team.members.any(id=current_user.id))
+    ).subquery()
+    
+    # 2. Obter os IDs dos projetos que pertencem a essas equipas OU que não têm equipa (Geral)
+    user_projects = db.query(Project.id).filter(
+        (Project.team_id.in_(user_teams)) | 
+        (Project.team_id.is_(None))
+    ).subquery()
+    
+    # 3. Aplicar a barreira final na query das tarefas
+    return query.filter(
+        (Ticket.assigned_to_id == current_user.id) | 
+        (Ticket.project_id.in_(user_projects))
+    )
 
 @router.get("/me/stats")
 def get_my_stats(
@@ -20,13 +52,9 @@ def get_my_stats(
     current_user: User = Depends(get_current_user)
 ):
     query = db.query(Ticket)
-    role = getattr(current_user, "role", "Member")
+    query = filter_tickets_by_permissions(query, current_user, db)
     
-    if role not in ["Admin", "Manager"]:
-        query = query.filter(Ticket.assigned_to_id == current_user.id)
-        
     all_tickets = query.all()
-    from datetime import date
     today = date.today()
     
     to_do = sum(1 for t in all_tickets if t.status and t.status.lower() in ['to do', 'a fazer'])
@@ -34,17 +62,16 @@ def get_my_stats(
     in_review = sum(1 for t in all_tickets if t.status and t.status.lower() in ['in review', 'em revisão', 'em revisao'])
     done = sum(1 for t in all_tickets if t.status and t.status.lower() in ['done', 'concluído', 'concluido'])
     
-    # CORRIGIDO: Removido o .date() desnecessário que causava o crash
     overdue = sum(1 for t in all_tickets if t.due_date and t.due_date < today and t.status and t.status.lower() not in ['done', 'concluído', 'concluido'])
     due_today = sum(1 for t in all_tickets if t.due_date and t.due_date == today and t.status and t.status.lower() not in ['done', 'concluído', 'concluido'])
 
-    # --- LÓGICA DAS HORAS DE HOJE ---
-    from models.worklog import WorkLog
     today_logs = db.query(WorkLog).filter(
         WorkLog.user_id == current_user.id,
         WorkLog.log_date == today
     ).all()
     hours_today = sum(log.hours for log in today_logs)
+
+    role = getattr(current_user, "role", "Member")
 
     return {
         "user_id": current_user.id,
@@ -64,9 +91,9 @@ def get_active_tickets(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    # O filtro base é simplesmente tudo o que está a correr
-    return db.query(Ticket).filter(Ticket.is_running == True).all()
-
+    query = db.query(Ticket).filter(Ticket.is_running == True)
+    query = filter_tickets_by_permissions(query, current_user, db)
+    return query.all()
 
 @router.post("/", response_model=TicketResponse, status_code=status.HTTP_201_CREATED)
 def create_ticket(
@@ -87,6 +114,16 @@ def create_ticket(
     db.add(db_ticket)
     db.commit()
     db.refresh(db_ticket)
+    
+    if db_ticket.assigned_to_id and db_ticket.assigned_to_id != current_user.id:
+        from models.notification import Notification
+        notif = Notification(
+            user_id=db_ticket.assigned_to_id,
+            message=f"Foste atribuído a uma nova tarefa: {db_ticket.title}"
+        )
+        db.add(notif)
+        db.commit()
+        
     return db_ticket
 
 @router.get("/", response_model=List[TicketResponse])
@@ -97,11 +134,9 @@ def get_tickets(
     current_user: User = Depends(get_current_user)
 ):
     query = db.query(Ticket)
-    role = getattr(current_user, "role", "Member")
     
-    #filtrar automaticamente se o utilizador não for Admin ou Manager
-    if role not in ["Admin", "Manager"]:
-        query = query.filter(Ticket.assigned_to_id == current_user.id)
+    # Validação Global Automática
+    query = filter_tickets_by_permissions(query, current_user, db)
     
     if search:
         query = query.filter(Ticket.title.ilike(f"%{search}%"))
@@ -117,28 +152,36 @@ def update_ticket(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    db_ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
+    query = db.query(Ticket).filter(Ticket.id == ticket_id)
+    query = filter_tickets_by_permissions(query, current_user, db)
+    db_ticket = query.first()
+    
     if not db_ticket:
-        raise HTTPException(status_code=404, detail="Tarefa não encontrada")
+        raise HTTPException(status_code=404, detail="Tarefa não encontrada ou não tens permissão para editá-la.")
+    
+    # Guardar o responsável antigo para comparar
+    old_assignee = db_ticket.assigned_to_id
     
     update_data = ticket_update.dict(exclude_unset=True)
-    
-    # 1. Retiramos as "session_hours" do dicionário para não dar erro
     session_hours = update_data.pop("session_hours", None)
     
-    # 2. Atualizamos os restantes campos normais da Tarefa (status, etc)
     for key, value in update_data.items():
         setattr(db_ticket, key, value)
         
     db.commit()
     
-    # 3. Criamos o registo invisível se o valor for maior que 0 (mesmo que sejam 0.002 horas)
+    # --- SISTEMA DE NOTIFICAÇÕES (ATUALIZAÇÃO) ---
+    new_assignee = db_ticket.assigned_to_id
+    if new_assignee and new_assignee != old_assignee and new_assignee != current_user.id:
+        from models.notification import Notification
+        notif = Notification(
+            user_id=new_assignee,
+            message=f"Foste realocado para a tarefa: {db_ticket.title}"
+        )
+        db.add(notif)
+        db.commit()
+    
     if session_hours is not None and session_hours > 0:
-        from models.worklog import WorkLog  
-        from datetime import date
-
-        print(f"--- A GUARDAR WORKLOG: User {current_user.id} trabalhou {session_hours}h ---")
-        
         new_log = WorkLog(
             user_id=current_user.id,
             ticket_id=db_ticket.id,
@@ -157,9 +200,13 @@ def delete_ticket(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    db_ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
+    # A barreira atua logo na pesquisa da tarefa
+    query = db.query(Ticket).filter(Ticket.id == ticket_id)
+    query = filter_tickets_by_permissions(query, current_user, db)
+    db_ticket = query.first()
+    
     if not db_ticket:
-        raise HTTPException(status_code=404, detail="Tarefa não encontrada")
+        raise HTTPException(status_code=404, detail="Tarefa não encontrada ou não tens permissão para apagá-la.")
     
     db.delete(db_ticket)
     db.commit()
