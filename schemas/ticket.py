@@ -44,5 +44,9 @@ class TicketResponse(BaseModel):
     start_date: Optional[date] = None
     is_running: bool
     session_hours: Optional[float] = 0.0  
+    final_description: Optional[str] = None
+    attachment_path: Optional[str] = None
+
+
     class Config:
         from_attributes = True

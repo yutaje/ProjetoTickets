@@ -1,3 +1,4 @@
+import os
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from core.security import get_current_user
@@ -10,12 +11,19 @@ from routers import audit, notification, report, user, project, ticket, auth, te
 from models.comment import Comment
 from models.worklog import WorkLog
 from sqlalchemy.orm import Session
+from fastapi.staticfiles import StaticFiles
 
 
 Base.metadata.create_all(bind=engine)
 
 
 app = FastAPI(title="FlowPulse API")
+
+
+UPLOAD_DIR = "uploads"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 
 
 app.add_middleware(

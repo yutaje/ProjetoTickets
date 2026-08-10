@@ -1,4 +1,5 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Form, UploadFile, File
+import os
 from sqlalchemy.orm import Session
 from database import get_db
 from models.ticket import Ticket
@@ -10,6 +11,12 @@ from schemas.ticket import TicketCreate, TicketUpdate, TicketResponse
 from core.security import get_current_user
 from typing import List, Optional
 from datetime import date
+import shutil
+
+
+UPLOAD_DIR = "uploads"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
 
 router = APIRouter(
     prefix="/tickets",
@@ -209,3 +216,37 @@ def delete_ticket(
     db.delete(db_ticket)
     db.commit()
     return None
+
+
+@router.put("/{ticket_id}/complete", response_model=TicketResponse)
+def complete_ticket(
+    ticket_id: int,
+    final_description: Optional[str] = Form(None),
+    tracked_hours: Optional[float] = Form(0.0),
+    file: Optional[UploadFile] = File(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    query = db.query(Ticket).filter(Ticket.id == ticket_id)
+    query = filter_tickets_by_permissions(query, current_user, db)
+    db_ticket = query.first()
+    
+    if not db_ticket:
+        raise HTTPException(status_code=404, detail="Tarefa não encontrada.")
+    
+    db_ticket.final_description = final_description or ""
+    db_ticket.status = "Done"
+    db_ticket.is_running = False
+    
+    if tracked_hours is not None:
+        db_ticket.tracked_hours = float(tracked_hours)
+
+    if file and file.filename:
+        file_location = os.path.join(UPLOAD_DIR, file.filename)
+        with open(file_location, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        db_ticket.attachment_path = f"/uploads/{file.filename}"
+
+    db.commit()
+    db.refresh(db_ticket)
+    return db_ticket
