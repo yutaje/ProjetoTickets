@@ -1,4 +1,4 @@
-from sqlalchemy import Boolean, Column, Integer, String, ForeignKey, Float, DateTime
+from sqlalchemy import Boolean, Column, Integer, String, ForeignKey, Float, DateTime, Date
 from sqlalchemy.orm import relationship
 from database import Base
 
@@ -18,10 +18,12 @@ class Ticket(Base):
     tracked_hours = Column(Float, default=0.0)
     due_date = Column(DateTime, nullable=True)
     is_running = Column(Boolean, default=False)
+    start_date = Column(Date, nullable=True)
 
     # Relações essenciais do Ticket:
     project = relationship("Project", back_populates="tickets")
     assignee = relationship("User", foreign_keys=[assigned_to_id])
+
     
-    # ADICIONA ESTA LINHA SE FALTAR:
     comments = relationship("Comment", back_populates="ticket", cascade="all, delete-orphan")
+    client_id = Column(Integer, ForeignKey("clients.id"), nullable=True)

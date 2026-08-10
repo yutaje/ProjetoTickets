@@ -45,7 +45,7 @@ def update_user(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    
+    # Verificar permissões: Apenas o próprio utilizador ou um Admin podem alterar
     role = getattr(current_user, "role", "Member")
     if current_user.id != user_id and role != "Admin":
         raise HTTPException(
@@ -57,7 +57,8 @@ def update_user(
     if not db_user:
         raise HTTPException(status_code=404, detail="Utilizador não encontrado.")
     
-    update_data = user_update.dict(exclude_unset=True)
+    # Utilizar model_dump para Pydantic v2 (evita problemas com campos opcionais como o role)
+    update_data = user_update.model_dump(exclude_unset=True)
     
     if "password" in update_data and update_data["password"]:
         hashed_password = pwd_context.hash(update_data["password"])

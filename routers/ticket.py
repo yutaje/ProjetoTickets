@@ -16,31 +16,22 @@ router = APIRouter(
     tags=["Tickets"]
 )
 
-# --- MIDDLEWARE DE SEGURANÇA INTERNO ---
 def filter_tickets_by_permissions(query, current_user: User, db: Session):
-    """
-    Filtra a query de base de dados consoante os acessos da conta.
-    - Admin: Vê toda a base de dados.
-    - Manager / Member: Vê tarefas atribuídas a si + tarefas de projetos das suas equipas + projetos sem equipa.
-    """
     role = getattr(current_user, "role", "Member")
     
     if role == "Admin":
         return query
         
-    # 1. Obter os IDs das equipas onde o utilizador é Líder OU Membro
     user_teams = db.query(Team.id).filter(
         (Team.owner_id == current_user.id) | 
         (Team.members.any(id=current_user.id))
-    ).subquery()
+    ).statement.correlate(None) # <--- Correção explícita do select
     
-    # 2. Obter os IDs dos projetos que pertencem a essas equipas OU que não têm equipa (Geral)
     user_projects = db.query(Project.id).filter(
         (Project.team_id.in_(user_teams)) | 
         (Project.team_id.is_(None))
-    ).subquery()
+    ).statement.correlate(None) # <--- Correção explícita do select
     
-    # 3. Aplicar a barreira final na query das tarefas
     return query.filter(
         (Ticket.assigned_to_id == current_user.id) | 
         (Ticket.project_id.in_(user_projects))
@@ -101,15 +92,21 @@ def create_ticket(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    # Converter strings vazias em None para evitar erros na BD
+    s_date = ticket.start_date if ticket.start_date else None
+    d_date = ticket.due_date if ticket.due_date else None
+
     db_ticket = Ticket(
         title=ticket.title,
         description=ticket.description,
         priority=ticket.priority,
         status=ticket.status,
-        project_id=ticket.project_id,
+        project_id=ticket.project_id if ticket.project_id else None,
+        client_id=ticket.client_id,
         assigned_to_id=ticket.assigned_to_id,
         estimated_hours=ticket.estimated_hours,
-        due_date=ticket.due_date
+        due_date=d_date,
+        start_date=s_date
     )
     db.add(db_ticket)
     db.commit()
@@ -134,8 +131,6 @@ def get_tickets(
     current_user: User = Depends(get_current_user)
 ):
     query = db.query(Ticket)
-    
-    # Validação Global Automática
     query = filter_tickets_by_permissions(query, current_user, db)
     
     if search:
@@ -159,18 +154,22 @@ def update_ticket(
     if not db_ticket:
         raise HTTPException(status_code=404, detail="Tarefa não encontrada ou não tens permissão para editá-la.")
     
-    # Guardar o responsável antigo para comparar
     old_assignee = db_ticket.assigned_to_id
     
-    update_data = ticket_update.dict(exclude_unset=True)
+    update_data = ticket_update.model_dump(exclude_unset=True)
     session_hours = update_data.pop("session_hours", None)
+    
+    # Garantir que se vier uma string vazia nas datas, passa a None
+    if "start_date" in update_data and not update_data["start_date"]:
+        update_data["start_date"] = None
+    if "due_date" in update_data and not update_data["due_date"]:
+        update_data["due_date"] = None
     
     for key, value in update_data.items():
         setattr(db_ticket, key, value)
         
     db.commit()
     
-    # --- SISTEMA DE NOTIFICAÇÕES (ATUALIZAÇÃO) ---
     new_assignee = db_ticket.assigned_to_id
     if new_assignee and new_assignee != old_assignee and new_assignee != current_user.id:
         from models.notification import Notification
@@ -200,7 +199,6 @@ def delete_ticket(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    # A barreira atua logo na pesquisa da tarefa
     query = db.query(Ticket).filter(Ticket.id == ticket_id)
     query = filter_tickets_by_permissions(query, current_user, db)
     db_ticket = query.first()

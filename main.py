@@ -6,7 +6,7 @@ from database import Base, engine, get_db
 from models.user import User
 from models.project import Project
 from models.ticket import Ticket
-from routers import audit, notification, report, user, project, ticket, auth, team
+from routers import audit, notification, report, user, project, ticket, auth, team, client
 from models.comment import Comment
 from models.worklog import WorkLog
 from sqlalchemy.orm import Session
@@ -36,7 +36,7 @@ origins = [
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"], 
     allow_headers=["*"], 
@@ -51,6 +51,7 @@ app.include_router(team.router)
 app.include_router(notification.router)  
 app.include_router(report.router)
 app.include_router(audit.router)
+app.include_router(client.router)  
 
 
 @app.get("/")

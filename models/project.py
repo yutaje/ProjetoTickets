@@ -14,3 +14,4 @@ class Project(Base):
 
     #relacao
     tickets = relationship("Ticket", back_populates="project", cascade="all, delete-orphan")
+    client_id = Column(Integer, ForeignKey("clients.id"), nullable=True)
