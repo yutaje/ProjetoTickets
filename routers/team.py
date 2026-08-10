@@ -4,6 +4,7 @@ from database import get_db
 from models.team import Team
 from models.user import User
 from models.project import Project
+from models.notification import Notification
 from schemas.team import TeamCreate, TeamResponse, TeamUpdate
 from core.security import require_manager_or_admin, get_current_user
 from typing import List
@@ -43,6 +44,16 @@ def create_team(
     db.add(db_team)
     db.commit()
     db.refresh(db_team)
+    
+    # Enviar notificação para cada membro adicionado na criação
+    for member in db_team.members:
+        notif = Notification(
+            user_id=member.id,
+            message=f"Foste integrado na nova equipa: {db_team.name}"
+        )
+        db.add(notif)
+    db.commit()
+
     return db_team
 
 @router.get("/", response_model=List[TeamResponse])
@@ -70,6 +81,9 @@ def update_team(
     if team_update.owner_id is not None:
         team.owner_id = team_update.owner_id
     
+    # Identificar membros antigos antes de atualizar
+    old_member_ids = {m.id for m in team.members}
+
     if team_update.member_ids is not None:
         if len(team_update.member_ids) > 0:
             users = db.query(User).filter(User.id.in_(team_update.member_ids)).all()
@@ -86,6 +100,20 @@ def update_team(
                 p.team_id = None
 
     db.commit()
+    
+    # Descobrir quem são os novos membros adicionados agora para notificar
+    new_member_ids = {m.id for m in team.members}
+    added_member_ids = new_member_ids - old_member_ids
+
+    for member_id in added_member_ids:
+        if member_id != current_user.id:
+            notif = Notification(
+                user_id=member_id,
+                message=f"Foste adicionado à equipa: {team.name}"
+            )
+            db.add(notif)
+    db.commit()
+
     db.refresh(team)
     return team
 
