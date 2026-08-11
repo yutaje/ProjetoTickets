@@ -10,7 +10,7 @@ class Ticket(Base):
     description = Column(String(1000), nullable=True)
     priority = Column(String(50), default="Média")
     status = Column(String(50), default="To Do")
-    
+    task_type = Column(String(50), nullable=True, default='Geral')
     project_id = Column(Integer, ForeignKey("projects.id"), nullable=False)
     assigned_to_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     

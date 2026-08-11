@@ -48,10 +48,8 @@ ALGORITHM = "HS256"
 
 @app.middleware("http")
 async def audit_log_middleware(request: Request, call_next):
-    # 1. Deixa o pedido passar e ser processado (aqui o FastAPI faz a segurança real)
     response = await call_next(request)
     
-    # 2. Só interceptamos as ações de modificação de dados
     if request.method in ["POST", "PUT", "DELETE"]:
         
         user_id = None
@@ -59,12 +57,9 @@ async def audit_log_middleware(request: Request, call_next):
         
         db = SessionLocal()
         try:
-            # 3. Vamos cuscar o Token
             if auth_header and auth_header.startswith("Bearer "):
                 token = auth_header.split(" ")[1]
                 try:
-                    # O CHEAT CODE: Lemos o token diretamente sem precisar da SECRET_KEY
-                    # (Não há perigo porque o FastAPI já validou a entrada antes)
                     payload = jwt.decode(token, options={"verify_signature": False})
                     sub = payload.get("sub")
                     
@@ -73,14 +68,12 @@ async def audit_log_middleware(request: Request, call_next):
                             # Se o token guardou um número, é o ID!
                             user_id = int(sub)
                         else:
-                            # Se o token guardou o Email, vamos à BD descobrir quem é!
                             user = db.query(User).filter(User.email == str(sub)).first()
                             if user:
                                 user_id = user.id
                 except Exception as e:
                     print(f"Aviso - O Porteiro não conseguiu ler o token: {e}")
             
-            # 4. Gravar na tabela AuditLog
             new_log = AuditLog(
                 user_id=user_id,
                 action=request.method,

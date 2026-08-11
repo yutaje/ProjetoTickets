@@ -13,6 +13,7 @@ class TicketCreate(BaseModel):
     estimated_hours: Optional[float] = 0.0
     due_date: Optional[date] = None
     start_date: Optional[date] = None
+    task_type: Optional[str] = "Geral"
 
 class TicketUpdate(BaseModel):
     title: Optional[str] = None
@@ -28,6 +29,7 @@ class TicketUpdate(BaseModel):
     start_date: Optional[date] = None
     is_running: Optional[bool] = None
     session_hours: Optional[float] = None
+    task_type: Optional[str] = None
 
 class TicketResponse(BaseModel):
     id: int
@@ -46,6 +48,7 @@ class TicketResponse(BaseModel):
     session_hours: Optional[float] = 0.0  
     final_description: Optional[str] = None
     attachment_path: Optional[str] = None
+    task_type: Optional[str] = None
 
 
     class Config:
