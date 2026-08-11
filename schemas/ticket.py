@@ -48,8 +48,8 @@ class TicketResponse(BaseModel):
     session_hours: Optional[float] = 0.0  
     final_description: Optional[str] = None
     attachment_path: Optional[str] = None
+    attachment_url: Optional[str] = None
     task_type: Optional[str] = None
-
 
     class Config:
         from_attributes = True

@@ -396,6 +396,7 @@ def complete_ticket(
     if not db_ticket:
         raise HTTPException(status_code=404, detail="Tarefa não encontrada.")
     
+    # 1. GRAVA A DESCRIÇÃO FINAL DIRETAMENTE
     db_ticket.final_description = final_description or ""
     db_ticket.status = "Done"
     db_ticket.is_running = False
@@ -409,11 +410,12 @@ def complete_ticket(
         )
         db.add(new_log)
 
+    # 2. GRAVA O FICHEIRO NA COLUNA CORRETA (attachment_path)
     if file and file.filename:
         file_location = os.path.join(UPLOAD_DIR, file.filename)
         with open(file_location, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
-        db_ticket.attachment_url = f"uploads/{file.filename}"
+        db_ticket.attachment_path = f"uploads/{file.filename}"
 
     db.commit()
     db.refresh(db_ticket)

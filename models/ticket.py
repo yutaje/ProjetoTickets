@@ -13,6 +13,9 @@ class Ticket(Base):
     task_type = Column(String(50), nullable=True, default='Geral')
     project_id = Column(Integer, ForeignKey("projects.id"), nullable=False)
     assigned_to_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+
+    final_description = Column(String, nullable=True)
+    attachment_path = Column(String, nullable=True)
     
     estimated_hours = Column(Float, default=0.0)
     tracked_hours = Column(Float, default=0.0)
