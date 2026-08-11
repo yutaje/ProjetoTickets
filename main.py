@@ -1,6 +1,6 @@
 import os
 import jwt
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
@@ -98,6 +98,35 @@ app.include_router(notification.router)
 app.include_router(report.router)
 app.include_router(audit.router)
 app.include_router(client.router)  
+
+
+@app.get("/admin/users-reports")
+def get_admin_users_reports(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    if getattr(current_user, "role", "Member") != "Admin":
+        raise HTTPException(status_code=403, detail="Acesso restrito.")
+    
+    users = db.query(User).all()
+    result = []
+    for u in users:
+        reports = db.query(DailyReport).filter(DailyReport.user_id == u.id).all()
+        reports_data = [{
+            "id": r.id,
+            "date": str(r.date),
+            "status": r.status,
+            "summary": r.summary,
+            "detailed_report": r.detailed_report,
+            "kilometers": r.kilometers,
+            "overtime_hours": r.overtime_hours
+        } for r in reports]
+        
+        result.append({
+            "user_id": u.id,
+            "name": u.name or u.email,
+            "email": u.email,
+            "reports": reports_data
+        })
+    return result
+
 
 @app.get("/")
 def home():

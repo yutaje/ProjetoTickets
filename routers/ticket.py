@@ -50,6 +50,7 @@ def filter_tickets_by_permissions(query, current_user: User, db: Session):
         (Ticket.project_id.in_(user_projects))
     )
 
+
 @router.get("/me/stats")
 def get_my_stats(
     db: Session = Depends(get_db),
@@ -357,28 +358,73 @@ def get_ai_focus_recommendation(
     projects = db.query(Project).all()
     proj_map = {p.id: p.name for p in projects}
 
-    tasks_details = []
+    today = date.today()
+    today_str = today.isoformat()
+
+    priority_weights = {'Crítica': 4, 'Alta': 3, 'Média': 2, 'Baixa': 1}
+
+    scored_tasks = []
     for t in active_tickets:
         proj_name = proj_map.get(t.project_id, "Projeto Geral")
-        tasks_details.append(
-            f"- [ID: #{t.id}] Título: '{t.title}' | Projeto: '{proj_name}' | Prioridade: {t.priority} | Prazo: {t.due_date or 'Sem prazo'} | Estado: {t.status}"
-        )
-    
-    tasks_text = "\n".join(tasks_details)
+        due_info = str(t.due_date).split('T')[0] if t.due_date else None
+        
+        # CÁLCULO MATEMÁTICO DE URGÊNCIA (Para a IA ponderar sem falhar)
+        urgency_score = priority_weights.get(t.priority, 1) * 2  # Peso base da prioridade
+        
+        temporal_desc = "Sem prazo definido"
+        if due_info:
+            due_date_obj = date.fromisoformat(due_info)
+            delta_days = (due_date_obj - today).days
+            
+            if delta_days < 0:
+                # Atrasada: ganha pontos pelo atraso, mas penalizada se for prioridade Baixa
+                urgency_score += abs(delta_days)
+                temporal_desc = f"Atrasada por {abs(delta_days)} dia(s)"
+            elif delta_days == 0:
+                # Vence hoje: salto massivo de urgência
+                urgency_score += 15
+                temporal_desc = "Vence EXATAMENTE HOJE"
+            else:
+                temporal_desc = "No prazo futuro"
+
+        scored_tasks.append({
+            "id": t.id,
+            "title": t.title,
+            "project": proj_name,
+            "priority": t.priority,
+            "due_date": due_info or "Sem prazo",
+            "temporal": temporal_desc,
+            "score": urgency_score
+        })
+
+    # Ordena por pontuação matemática para a IA ver quem lidera
+    scored_tasks.sort(key=lambda x: x["score"], reverse=True)
+
+    tasks_text = "\n".join([
+        f"- [ID: #{st['id']}] Título: '{st['title']}' | Projeto: '{st['project']}' | Prioridade: {st['priority']} | Prazo: {st['due_date']} ({st['temporal']}) | Score Calculado: {st['score']}"
+        for st in scored_tasks
+    ])
     
     prompt = f"""
-    És o assistente técnico de operações da RFS. Analisa a lista de tarefas ativas e gera uma recomendação detalhada.
+    A data atual é {today_str}. És o gestor de operações sénior da RFS.
+    Abaixo tens a lista de tarefas ativas ordenada pelo sistema com base num algoritmo de cruzamento entre prioridade e prazos (Score de Urgência).
+
+    Analisa criticamente os dados, valida qual é a tarefa mais crítica para o técnico executar agora (por exemplo, ponderando se uma tarefa que acaba hoje com prioridade Crítica supera uma tarefa atrasada de prioridade Baixa), e redige uma recomendação de foco altamente profissional, direta e justificada.
+
+    Tarefas ativas:
     {tasks_text}
     """
 
     try:
         response = client.models.generate_content(
-            model='gemini-flash-latest',
+            model='gemini-2.0-flash',
             contents=prompt,
         )
         return {"recommendation": response.text} 
     except Exception as e:
-        return {"recommendation": "Erro ao comunicar com a IA."}
+        print(f"AVISO: IA de foco falhou. Erro: {str(e)}")
+        top_task = scored_tasks[0]
+        return {"recommendation": f"Análise Operacional Automática: Deves focar-te na tarefa #{top_task['id']} ('{top_task['title']}') devido ao cruzamento da sua prioridade ({top_task['priority']}) com o prazo ({top_task['due_date']})."}
 
 @router.put("/{ticket_id}/complete", response_model=TicketResponse)
 def complete_ticket(
@@ -460,7 +506,10 @@ def generate_daily_ai_report(db: Session = Depends(get_db), current_user: User =
     logs = db.query(TimeLog).filter(TimeLog.user_id == current_user.id, TimeLog.date == today).all()
     
     if not logs:
-        return {"summary": "Sem tarefas trabalhadas hoje.", "detailed_report": "Não foram registadas horas."}
+        return {
+            "summary": "Sem tarefas registadas hoje.", 
+            "detailed_report": "Não foram contabilizadas horas em nenhuma tarefa no dia de hoje."
+        }
         
     hours_per_ticket = {}
     for log in logs:
@@ -469,7 +518,43 @@ def generate_daily_ai_report(db: Session = Depends(get_db), current_user: User =
     ticket_ids = list(hours_per_ticket.keys())
     tickets = db.query(Ticket).filter(Ticket.id.in_(ticket_ids)).all()
     
-    return {"summary": "Resumo diário", "detailed_report": "Relatório gerado."}
+    tasks_info = []
+    for t in tickets:
+        tasks_info.append(f"- Tarefa #{t.id}: {t.title} (Estado: {t.status}, Descrição: {t.description or 'N/A'}) - Tempo hoje: {hours_per_ticket[t.id]}h")
+    
+    tasks_text = "\n".join(tasks_info)
+    
+    prompt = f"""
+    És um assistente técnico inteligente da RFS. Com base nas seguintes tarefas executadas pelo técnico no dia de hoje, gera:
+    1. Um "summary" (um resumo curto e profissional de uma linha do dia).
+    2. Um "detailed_report" (um relatório detalhado estruturado com as intervenções efetuadas).
+    
+    Tarefas de hoje:
+    {tasks_text}
+    """
+
+    try:
+        response = client.models.generate_content(
+            model='gemini-2.0-flash',
+            contents=prompt,
+        )
+        text_result = response.text
+        
+        return {
+            "summary": text_result[:150] + "...", 
+            "detailed_report": text_result
+        }
+    except Exception as e:
+        print(f"AVISO: IA falhou, a usar relatório padrão. Erro: {str(e)}")
+        
+        # Fallback automático estruturado para nunca deixar o técnico pendurado
+        fallback_summary = f"Executadas {len(tickets)} intervenções técnicas planeadas para o dia de hoje."
+        fallback_details = "RELATÓRIO DE ATIVIDADE DIÁRIA (RFS)\n\nIntervenções efetuadas:\n" + "\n".join(tasks_info)
+        
+        return {
+            "summary": fallback_summary,
+            "detailed_report": fallback_details
+        }
 
 @router.put("/my-day/today")
 def update_daily_report(
@@ -562,3 +647,5 @@ def create_ticket_comment(
     db.commit()
     db.refresh(new_comment)
     return new_comment
+
+
