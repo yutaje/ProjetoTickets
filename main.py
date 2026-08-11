@@ -12,6 +12,8 @@ from models.comment import Comment
 from models.worklog import WorkLog
 from sqlalchemy.orm import Session
 from fastapi.staticfiles import StaticFiles
+from models.daily_report import DailyReport
+from models.time_log import TimeLog
 
 
 Base.metadata.create_all(bind=engine)

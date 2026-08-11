@@ -10,10 +10,13 @@ from models.team import Team
 from schemas.ticket import TicketCreate, TicketUpdate, TicketResponse
 from core.security import get_current_user
 from typing import List, Optional
-from datetime import date
+from datetime import date, timedelta
 import shutil
 from google import genai 
 import traceback
+from models.notification import Notification
+from models.time_log import TimeLog
+from models.daily_report import DailyReport # <-- ADICIONADO AQUI PARA NÃO DAR ERRO
 
 
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
@@ -66,11 +69,11 @@ def get_my_stats(
     overdue = sum(1 for t in all_tickets if t.due_date and t.due_date < today and t.status and t.status.lower() not in ['done', 'concluído', 'concluido'])
     due_today = sum(1 for t in all_tickets if t.due_date and t.due_date == today and t.status and t.status.lower() not in ['done', 'concluído', 'concluido'])
 
-    today_logs = db.query(WorkLog).filter(
-        WorkLog.user_id == current_user.id,
-        WorkLog.log_date == today
+    today_logs = db.query(TimeLog).filter(
+        TimeLog.user_id == current_user.id,
+        TimeLog.date == today
     ).all()
-    hours_today = sum(log.hours for log in today_logs)
+    hours_today = sum(log.hours_spent for log in today_logs)
 
     role = getattr(current_user, "role", "Member")
 
@@ -139,6 +142,7 @@ def get_tickets(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    check_and_create_deadline_notifications(current_user, db)
     query = db.query(Ticket)
     query = filter_tickets_by_permissions(query, current_user, db)
     
@@ -149,57 +153,147 @@ def get_tickets(
         
     return query.all()
 
-@router.put("/{ticket_id}", response_model=TicketResponse)
+
+@router.get("/my-day/today")
+def get_or_create_daily_report(
+    db: Session = Depends(get_db), 
+    current_user: User = Depends(get_current_user)
+):
+    today = date.today()
+    
+    # 1. Procurar o relatório de hoje; se não existir, cria-se automaticamente como Rascunho
+    report = db.query(DailyReport).filter(
+        DailyReport.user_id == current_user.id,
+        DailyReport.date == today
+    ).first()
+    
+    if not report:
+        report = DailyReport(
+            user_id=current_user.id, 
+            date=today, 
+            status="Rascunho"
+        )
+        db.add(report)
+        db.commit()
+        db.refresh(report)
+        
+    # 2. Ir buscar os TimeLogs de hoje do utilizador para saber as tarefas onde trabalhou
+    logs = db.query(TimeLog).filter(
+        TimeLog.user_id == current_user.id,
+        TimeLog.date == today
+    ).all()
+    
+    # Agrupar e somar as horas por cada ticket de hoje
+    hours_per_ticket = {}
+    for log in logs:
+        hours_per_ticket[log.ticket_id] = hours_per_ticket.get(log.ticket_id, 0) + log.hours_spent
+        
+    # 3. Ir buscar os dados completos dos tickets trabalhados
+    ticket_ids = list(hours_per_ticket.keys())
+    
+    # Se existirem tickets trabalhados hoje, vamos buscá-los; senão, a lista fica vazia
+    tickets_worked_today = db.query(Ticket).filter(Ticket.id.in_(ticket_ids)).all() if ticket_ids else []
+    
+    # 4. Preparar os dados mastigados para o Frontend e para a IA
+    tickets_data = []
+    for t in tickets_worked_today:
+        tickets_data.append({
+            "id": t.id,
+            "title": t.title,
+            "status": t.status,
+            "priority": t.priority,
+            "description": t.description,
+            "hours_today": round(hours_per_ticket[t.id], 2) # Tempo gasto APENAS HOJE
+        })
+        
+    return {
+        "report": {
+            "id": report.id,
+            "status": report.status,
+            "summary": report.summary,
+            "detailed_report": report.detailed_report,
+            "kilometers": report.kilometers,
+            "overtime_hours": report.overtime_hours
+        },
+        "tickets_worked": tickets_data
+    }
+
+
+@router.get("/my-day/week")
+def get_week_status(
+    db: Session = Depends(get_db), 
+    current_user: User = Depends(get_current_user)
+):
+    today = date.today()
+    start_date = today - timedelta(days=6) # Pega nos últimos 7 dias (incluindo hoje)
+    
+    # Procurar relatórios deste utilizador nos últimos 7 dias
+    reports = db.query(DailyReport).filter(
+        DailyReport.user_id == current_user.id,
+        DailyReport.date >= start_date,
+        DailyReport.date <= today
+    ).all()
+    
+    # Criar um dicionário rápido para procurar por data
+    report_dict = {r.date: r for r in reports}
+    
+    week_data = []
+    dias_semana = ["Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom"]
+    
+    for i in range(7):
+        current_d = start_date + timedelta(days=i)
+        rep = report_dict.get(current_d)
+        
+        nome_dia = dias_semana[current_d.weekday()]
+        
+        if rep:
+            status = rep.status
+        else:
+            # Se não há relatório e é um dia no passado, está em falta!
+            status = "Em falta" if current_d < today else "Não iniciado"
+            
+        week_data.append({
+            "date": current_d.isoformat(),
+            "day_name": nome_dia,
+            "day_num": current_d.day,
+            "status": status
+        })
+        
+    return week_data
+
+
+@router.put("/{ticket_id}")
 def update_ticket(
     ticket_id: int,
-    ticket_update: TicketUpdate,
+    ticket_data: dict, # (Ou o Schema Pydantic que estiveres a usar, ex: TicketUpdate)
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    query = db.query(Ticket).filter(Ticket.id == ticket_id)
-    query = filter_tickets_by_permissions(query, current_user, db)
-    db_ticket = query.first()
+    ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Tarefa não encontrada.")
     
-    if not db_ticket:
-        raise HTTPException(status_code=404, detail="Tarefa não encontrada ou não tens permissão para editá-la.")
+    # Extrair e remover 'session_hours' do dicionário principal, pois não pertence à tabela Ticket
+    session_hours = ticket_data.pop("session_hours", None)
     
-    old_assignee = db_ticket.assigned_to_id
-    
-    update_data = ticket_update.model_dump(exclude_unset=True)
-    session_hours = update_data.pop("session_hours", None)
-    
-    if "start_date" in update_data and not update_data["start_date"]:
-        update_data["start_date"] = None
-    if "due_date" in update_data and not update_data["due_date"]:
-        update_data["due_date"] = None
-    
-    for key, value in update_data.items():
-        setattr(db_ticket, key, value)
+    # 1. Atualizar os campos normais do Ticket (ex: tracked_hours, is_running, status...)
+    for key, value in ticket_data.items():
+        setattr(ticket, key, value)
         
-    db.commit()
-    
-    new_assignee = db_ticket.assigned_to_id
-    if new_assignee and new_assignee != old_assignee and new_assignee != current_user.id:
-        from models.notification import Notification
-        notif = Notification(
-            user_id=new_assignee,
-            message=f"Foste realocado para a tarefa: {db_ticket.title}"
-        )
-        db.add(notif)
-        db.commit()
-    
-    if session_hours is not None and session_hours > 0:
-        new_log = WorkLog(
+    # 2. O TRUQUE: Se o frontend enviou 'session_hours', gravamos no Registo Diário!
+    if session_hours and session_hours > 0:
+        new_log = TimeLog(
+            ticket_id=ticket.id,
             user_id=current_user.id,
-            ticket_id=db_ticket.id,
-            hours=session_hours,
-            log_date=date.today()
+            date=date.today(),
+            hours_spent=session_hours
         )
         db.add(new_log)
-        db.commit()
         
-    db.refresh(db_ticket)
-    return db_ticket
+    db.commit()
+    db.refresh(ticket)
+    
+    return ticket
 
 @router.delete("/{ticket_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_ticket(
@@ -231,21 +325,34 @@ def generate_ai_report(
     if not ticket:
         raise HTTPException(status_code=404, detail="Tarefa não encontrada.")
     
+    # Tentar ir buscar observações/comentários de forma totalmente segura
+    comments_text = "Nenhuma observação registada."
+    try:
+        from models.comment import Comment
+        comments = db.query(Comment).filter(Comment.ticket_id == ticket.id).all()
+        if comments:
+            comments_text = "\n".join([f"- {c.text}" for c in comments])
+    except Exception:
+        pass # Se houver qualquer detalhe com o modelo de comentários, ignora e segue semcrashar
+    
     prompt = f"""
     És um assistente inteligente para técnicos de campo da empresa RFS. 
-    Com base nos dados desta tarefa, redige um resumo profissional e um relatório detalhado de intervenção em língua portuguesa.
+    Com base nos dados desta tarefa e nas observações de campo registadas, redige um resumo profissional e um relatório detalhado de intervenção em língua portuguesa.
     
     Título da Tarefa: {ticket.title}
     Descrição Inicial: {ticket.description or 'N/A'}
     Tempo Gasto: {ticket.tracked_hours} horas
     Prioridade: {ticket.priority}
     
-    O relatório deve descrever de forma formal o trabalho realizado e o estado de conclusão. Formata o texto de forma limpa para um técnico poder apenas ler, ajustar e submeter.
+    Observações / Notas recolhidas durante a execução:
+    {comments_text}
+    
+    O relatório deve descrever de forma formal o trabalho realizado e o estado de conclusão[cite: 2]. Formata o texto de forma limpa para um técnico poder apenas ler, ajustar e submeter[cite: 2].
     """
 
     try:
         response = client.models.generate_content(
-            model='gemini-2.0-flash',
+            model='gemini-flash-latest',
             contents=prompt,
         )
         return {"generated_report": response.text}
@@ -257,7 +364,7 @@ def generate_ai_report(
 - Descrição Inicial: {ticket.description or 'Intervenção técnica regular efetuada conforme planeamento.'}
 - Estado de Conclusão: Concluído com sucesso.
 - Tempo Total Despendido: {ticket.tracked_hours or 0.0} horas.
-- Observações de Campo: Trabalhos concluídos dentro dos parâmetros estipulados, sem registo de incidentes críticos ou anomalias estruturais. Material aplicado conforme previsto."""
+- Observações de Campo: {comments_text}"""
         
         return {"generated_report": fallback_report}
 
@@ -303,10 +410,10 @@ def get_ai_focus_recommendation(
 
     try:
         response = client.models.generate_content(
-            model='gemini-2.0-flash',
+            model='gemini-flash-latest',
             contents=prompt,
         )
-        return {"generated_report": response.text} # ou response.text diretamente dependendo da chave
+        return {"recommendation": response.text} 
     except Exception as e:
         # Fallback detalhado estruturado caso a API esgote a quota
         fallback_text = "ANÁLISE DE FOCO INTELIGENTE (FALLBACK LOCAL):\n\n"
@@ -351,3 +458,178 @@ def complete_ticket(
     db.commit()
     db.refresh(db_ticket)
     return db_ticket
+
+
+def check_and_create_deadline_notifications(user: User, db: Session):
+    try:
+        today = date.today()
+        today_str = today.isoformat() # Formato "YYYY-MM-DD"
+        
+        query = db.query(Ticket)
+        query = filter_tickets_by_permissions(query, user, db)
+        tickets = query.filter(Ticket.status != "Done").all()
+        
+        for t in tickets:
+            if not t.due_date:
+                continue
+                
+            # Converter de forma segura para string "YYYY-MM-DD" independentemente do tipo na BD
+            if isinstance(t.due_date, str):
+                due_date_str = t.due_date.split('T')[0]
+            elif hasattr(t.due_date, 'isoformat'):
+                due_date_str = t.due_date.isoformat().split('T')[0]
+            else:
+                continue
+            
+            # 1. Prazo acaba hoje
+            if due_date_str == today_str:
+                msg = f"O prazo da tarefa '#{t.id} - {t.title}' acaba hoje!"
+                exists = db.query(Notification).filter(
+                    Notification.user_id == user.id,
+                    Notification.message == msg
+                ).first()
+                
+                if not exists:
+                    db.add(Notification(user_id=user.id, message=msg))
+                    
+            # 2. Tarefa atrasada
+            elif due_date_str < today_str:
+                msg = f"ATENÇÃO: A tarefa '#{t.id} - {t.title}' está atrasada!"
+                exists = db.query(Notification).filter(
+                    Notification.user_id == user.id,
+                    Notification.message == msg
+                ).first()
+                
+                if not exists:
+                    db.add(Notification(user_id=user.id, message=msg))
+                    
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        print("Erro detalhado nas notificações de prazo:", e)
+
+@router.post("/my-day/generate-ai")
+def generate_daily_ai_report(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    today = date.today()
+    logs = db.query(TimeLog).filter(TimeLog.user_id == current_user.id, TimeLog.date == today).all()
+    
+    if not logs:
+        return {"summary": "Sem tarefas trabalhadas hoje.", "detailed_report": "Não foram registadas horas em nenhuma tarefa durante o dia de hoje."}
+        
+    hours_per_ticket = {}
+    for log in logs:
+        hours_per_ticket[log.ticket_id] = hours_per_ticket.get(log.ticket_id, 0) + log.hours_spent
+        
+    ticket_ids = list(hours_per_ticket.keys())
+    tickets = db.query(Ticket).filter(Ticket.id.in_(ticket_ids)).all()
+    
+    # Tentar ir buscar os comentários/observações do dia para enriquecer a IA
+    comments_context = ""
+    try:
+        from models.comment import Comment
+        comments = db.query(Comment).filter(Comment.ticket_id.in_(ticket_ids)).all()
+        if comments:
+            comments_context = "Observações registadas nestas tarefas:\n" + "\n".join([f"- Tarefa #{c.ticket_id}: {c.text}" for c in comments])
+    except Exception as e:
+        print("Erro a buscar comentários:", e)
+        pass
+        
+    tasks_context = ""
+    for t in tickets:
+        tasks_context += f"- #{t.id} {t.title} (Estado: {t.status}) -> Tempo gasto hoje: {round(hours_per_ticket[t.id], 2)}h\n"
+        
+    prompt = f"""
+    És um assistente técnico operacional sénior da RFS. O teu objetivo é analisar e redigir o relatório diário profissional de um técnico.
+    
+    Aqui estão os dados das tarefas em que ele trabalhou hoje e o respetivo tempo de execução:
+    {tasks_context}
+    
+    {comments_context}
+    
+    Com base nisto, redige o relatório seguindo ESTRITAMENTE este formato e usando um tom formal e limpo:
+    RESUMO:
+    (Escreve aqui um parágrafo curto e direto ao assunto com o resumo global do dia)
+    DETALHADO:
+    (Escreve aqui o relatório longo detalhado do dia, cruzando as horas, as tarefas e justificando o trabalho contínuo)
+    """
+    
+    try:
+        response = client.models.generate_content(
+            model='gemini-flash-latest',
+            contents=prompt,
+        )
+        text = response.text
+        summary = ""
+        detailed = ""
+        
+        # Partir o texto nas secções certas baseadas nas tags que pedimos ao Gemini
+        if "RESUMO:" in text and "DETALHADO:" in text:
+            parts = text.split("DETALHADO:")
+            summary = parts[0].replace("RESUMO:", "").strip()
+            detailed = parts[1].strip()
+        else:
+            detailed = text
+            summary = "Resumo detalhado gerado abaixo."
+            
+        return {"summary": summary, "detailed_report": detailed}
+    except Exception as e:
+        # AQUI VAMOS IMPRIMIR O ERRO REAL NA CONSOLA E NO ECRÃ
+        error_msg = str(e)
+        print(f"ERRO CRÍTICO NA IA: {error_msg}")
+        traceback.print_exc() # Imprime o erro completo na consola do terminal
+        
+        return {
+            "summary": "Erro técnico ao gerar IA.", 
+            "detailed_report": f"O Gemini devolveu o seguinte erro: {error_msg}"
+        }
+
+
+@router.put("/my-day/today")
+def update_daily_report(
+    report_data: dict, 
+    db: Session = Depends(get_db), 
+    current_user: User = Depends(get_current_user)
+):
+    today = date.today()
+    report = db.query(DailyReport).filter(
+        DailyReport.user_id == current_user.id, 
+        DailyReport.date == today
+    ).first()
+    
+    if not report:
+        raise HTTPException(status_code=404, detail="Relatório de hoje não encontrado.")
+        
+    # Grava os dados finais do relatório
+    report.summary = report_data.get("summary", report.summary)
+    report.detailed_report = report_data.get("detailed_report", report.detailed_report)
+    report.kilometers = report_data.get("kilometers", report.kilometers)
+    report.overtime_hours = report_data.get("overtime_hours", report.overtime_hours)
+    
+    # Muda o estado para submetido conforme as regras da RFS
+    report.status = "Submetido" 
+    
+    db.commit()
+    db.refresh(report)
+    return {"message": "Relatório diário submetido com sucesso!"}
+
+
+@router.put("/my-day/reopen")
+def reopen_daily_report(
+    db: Session = Depends(get_db), 
+    current_user: User = Depends(get_current_user)
+):
+    today = date.today()
+    report = db.query(DailyReport).filter(
+        DailyReport.user_id == current_user.id, 
+        DailyReport.date == today
+    ).first()
+    
+    if not report:
+        raise HTTPException(status_code=404, detail="Relatório não encontrado.")
+        
+    # Volta a colocar o relatório em modo Rascunho!
+    report.status = "Rascunho"
+    
+    db.commit()
+    db.refresh(report)
+    return {"message": "Relatório reaberto com sucesso!"}
