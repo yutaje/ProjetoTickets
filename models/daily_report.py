@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, ForeignKey, Date, Text
+from sqlalchemy import Column, Integer, String, Float, ForeignKey, Date, Text, DateTime
 from database import Base
 
 class DailyReport(Base):
@@ -22,3 +22,5 @@ class DailyReport(Base):
     rejection_reason = Column(String, nullable=True)
 
     image_path = Column(String, nullable=True)
+
+    submitted_at = Column(DateTime, nullable=True)

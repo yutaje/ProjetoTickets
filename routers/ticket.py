@@ -19,6 +19,11 @@ from models.time_log import TimeLog
 from models.daily_report import DailyReport
 from models.comment import Comment
 from datetime import date, timedelta, datetime
+from docx import Document
+from fastapi.responses import StreamingResponse
+import io
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
 
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
@@ -606,6 +611,7 @@ def update_daily_report(
 
     report.status = "Submetido" 
     report.rejection_reason = None
+    report.submitted_at = datetime.now()
     
     db.commit()
     db.refresh(report)
@@ -723,3 +729,140 @@ def create_ticket_comment(
     return new_comment
 
 
+@router.get("/my-day/export-pdf")
+def export_daily_report_pdf(
+    target_date: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    if target_date:
+        report_date = datetime.strptime(target_date, "%Y-%m-%d").date()
+    else:
+        report_date = date.today()
+        
+    report = db.query(DailyReport).filter(
+        DailyReport.user_id == current_user.id,
+        DailyReport.date == report_date
+    ).first()
+    
+    if not report:
+        raise HTTPException(status_code=404, detail="Relatório não encontrado para esta data.")
+        
+    # Gerar PDF utilizando ReportLab
+    buffer = io.BytesIO()
+    p = canvas.Canvas(buffer, pagesize=letter)
+    width, height = letter
+    
+    # Cabeçalho
+    p.setFont("Helvetica-Bold", 16)
+    p.drawString(50, height - 50, "Relatório Diário de Atividade")
+    
+    p.setFont("Helvetica", 10)
+    p.drawString(50, height - 75, f"Técnico: {current_user.name or current_user.email}")
+    p.drawString(50, height - 90, f"Data: {report.date}")
+    p.drawString(50, height - 105, f"Estado: {report.status}")
+    
+    # Secção de Resumo
+    p.setFont("Helvetica-Bold", 12)
+    p.drawString(50, height - 140, "Resumo do Dia")
+    p.setFont("Helvetica", 10)
+    
+    # Texto multilinha simples para o resumo
+    text_object = p.beginText(50, height - 160)
+    text_object.setFont("Helvetica", 10)
+    summary_text = report.summary or "Sem resumo registado."
+    for line in summary_text.split('\n'):
+        text_object.textLine(line)
+    p.drawText(text_object)
+    
+    # Secção de Relatório Detalhado
+    p.setFont("Helvetica-Bold", 12)
+    p.drawString(50, height - 240, "Relatório Detalhado")
+    
+    det_object = p.beginText(50, height - 260)
+    det_object.setFont("Helvetica", 10)
+    detailed_text = report.detailed_report or "Sem relatório detalhado."
+    for line in detailed_text.split('\n'):
+        det_object.textLine(line)
+    p.drawText(det_object)
+    
+    p.showPage()
+    p.save()
+    
+    buffer.seek(0)
+    
+    filename = f"Relatorio_{report.date}.pdf"
+    
+    return StreamingResponse(
+        buffer,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+
+@router.get("/my-day/export-pdf")
+def export_daily_report_pdf(
+    target_date: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    if target_date:
+        report_date = datetime.strptime(target_date, "%Y-%m-%d").date()
+    else:
+        report_date = date.today()
+        
+    report = db.query(DailyReport).filter(
+        DailyReport.user_id == current_user.id,
+        DailyReport.date == report_date
+    ).first()
+    
+    if not report:
+        raise HTTPException(status_code=404, detail="Relatório não encontrado para esta data.")
+        
+    # Aqui podes usar a tua lógica atual de geração de PDF (ReportLab, etc.)
+    # Exemplo simulado de stream de PDF caso já tenhas uma função para isto:
+    buffer = io.BytesIO()
+    buffer.write(f"Relatorio PDF - Data: {report.date} - Tecnico: {current_user.name}".encode('utf-8'))
+    buffer.seek(0)
+    
+    return StreamingResponse(
+        buffer,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename=Relatorio_{report.date}.pdf"}
+    )
+
+@router.get("/my-day/export-word")
+def export_daily_report_word(
+    target_date: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    if target_date:
+        report_date = datetime.strptime(target_date, "%Y-%m-%d").date()
+    else:
+        report_date = date.today()
+        
+    report = db.query(DailyReport).filter(
+        DailyReport.user_id == current_user.id,
+        DailyReport.date == report_date
+    ).first()
+    
+    if not report:
+        raise HTTPException(status_code=404, detail="Relatório não encontrado para esta data.")
+        
+    doc = Document()
+    doc.add_heading("Relatório Diário de Atividade", level=1)
+    doc.add_paragraph(f"Técnico: {current_user.name or current_user.email}")
+    doc.add_paragraph(f"Data: {report.date}")
+    doc.add_paragraph(f"Resumo: {report.summary or 'Sem resumo.'}")
+    doc.add_paragraph(f"Relatório Detalhado: {report.detailed_report or 'Sem detalhes.'}")
+    
+    file_stream = io.BytesIO()
+    doc.save(file_stream)
+    file_stream.seek(0)
+    
+    return StreamingResponse(
+        file_stream, 
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f"attachment; filename=Relatorio_{report.date}.docx"}
+    )

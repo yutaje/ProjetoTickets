@@ -27,6 +27,7 @@ class Ticket(Base):
     project = relationship("Project", back_populates="tickets")
     assignee = relationship("User", foreign_keys=[assigned_to_id])
 
+    parent_id = Column(Integer, ForeignKey("tickets.id"), nullable=True)
     
     comments = relationship("Comment", back_populates="ticket", cascade="all, delete-orphan")
     client_id = Column(Integer, ForeignKey("clients.id"), nullable=True)
