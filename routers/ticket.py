@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Query, Form, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Form, UploadFile, File, Form
 import os
 from sqlalchemy.orm import Session
 from database import get_db
@@ -18,6 +18,7 @@ from models.notification import Notification
 from models.time_log import TimeLog
 from models.daily_report import DailyReport
 from models.comment import Comment
+from datetime import date, timedelta, datetime
 
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
@@ -156,10 +157,15 @@ def get_tickets(
 
 @router.get("/my-day/today")
 def get_or_create_daily_report(
+    target_date: Optional[str] = Query(None), # <-- Novo parâmetro
     db: Session = Depends(get_db), 
     current_user: User = Depends(get_current_user)
 ):
-    today = date.today()
+    # Se vier data no pedido, usa essa, senão usa a data de hoje
+    if target_date:
+        today = datetime.strptime(target_date, "%Y-%m-%d").date()
+    else:
+        today = date.today()
     
     report = db.query(DailyReport).filter(
         DailyReport.user_id == current_user.id,
@@ -559,22 +565,46 @@ def generate_daily_ai_report(db: Session = Depends(get_db), current_user: User =
 
 @router.put("/my-day/today")
 def update_daily_report(
-    report_data: dict, 
+    target_date: Optional[str] = Query(None),
+    summary: Optional[str] = Form(None),
+    detailed_report: Optional[str] = Form(None),
+    kilometers: Optional[float] = Form(0.0),
+    overtime_hours: Optional[float] = Form(0.0),
+    pending_work: Optional[str] = Form(None),
+    incidents: Optional[str] = Form(None),
+    materials: Optional[str] = Form(None),
+    file: Optional[UploadFile] = File(None), # <- O nosso ficheiro!
     db: Session = Depends(get_db), 
     current_user: User = Depends(get_current_user)
 ):
-    today = date.today()
+    if target_date:
+        today = datetime.strptime(target_date, "%Y-%m-%d").date()
+    else:
+        today = date.today()
+        
     report = db.query(DailyReport).filter(DailyReport.user_id == current_user.id, DailyReport.date == today).first()
     
     if not report:
         raise HTTPException(status_code=404, detail="Relatório não encontrado.")
         
-    report.summary = report_data.get("summary", report.summary)
-    report.detailed_report = report_data.get("detailed_report", report.detailed_report)
-    report.kilometers = report_data.get("kilometers", report.kilometers)
-    report.overtime_hours = report_data.get("overtime_hours", report.overtime_hours)
-    report.status = "Submetido" 
+    # Atualizar campos de texto
+    report.summary = summary
+    report.detailed_report = detailed_report
+    report.kilometers = kilometers
+    report.overtime_hours = overtime_hours
+    # (Se tiveres estes campos no model, atualiza-os também)
+    if hasattr(report, 'pending_work'): report.pending_work = pending_work
+    if hasattr(report, 'incidents'): report.incidents = incidents
+    if hasattr(report, 'materials'): report.materials = materials
 
+    # Guardar a imagem se ela for enviada
+    if file and file.filename:
+        file_location = os.path.join(UPLOAD_DIR, file.filename)
+        with open(file_location, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        report.image_path = f"uploads/{file.filename}"
+
+    report.status = "Submetido" 
     report.rejection_reason = None
     
     db.commit()
@@ -614,19 +644,28 @@ def update_report_status_admin(
         raise HTTPException(status_code=404, detail="Relatório não encontrado.")
         
     new_status = status_data.get("status")
-    reason = status_data.get("rejection_reason") # Apanha o motivo
+    reason = status_data.get("rejection_reason") 
 
     if new_status == "Recusado":
         report.status = "Rascunho"
-        report.rejection_reason = reason # Grava o motivo
+        report.rejection_reason = reason 
+        
+        
+        data_formatada = report.date.strftime("%d/%m/%Y") if hasattr(report.date, 'strftime') else str(report.date)
+        
+        notif_msg = f"O teu relatório do dia {data_formatada} foi recusado. Motivo: {reason}"
+        nova_notificacao = Notification(user_id=report.user_id, message=notif_msg)
+        db.add(nova_notificacao)
+        # ------------------------------
+        
     else:
         report.status = new_status
         if new_status == "Validado":
-            report.rejection_reason = None # Limpa se foi validado
+            report.rejection_reason = None 
             
     db.commit()
     db.refresh(report)
-    return {"message": "Estado atualizado!"}
+    return {"message": "Estado atualizado com sucesso!"}
 
 
 @router.get("/{ticket_id}/comments")

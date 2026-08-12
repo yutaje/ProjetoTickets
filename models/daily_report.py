@@ -20,3 +20,5 @@ class DailyReport(Base):
     kilometers = Column(Float, default=0.0)
 
     rejection_reason = Column(String, nullable=True)
+
+    image_path = Column(String, nullable=True)

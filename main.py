@@ -17,6 +17,11 @@ from models.time_log import TimeLog
 from models.audit_log import AuditLog
 from schemas.user import UserResponse 
 from routers import audit, notification, report, user, project, ticket, auth, team, client
+from datetime import datetime, date
+from apscheduler.schedulers.background import BackgroundScheduler
+from models.daily_report import DailyReport
+from models.notification import Notification
+
 
 
 Base.metadata.create_all(bind=engine)
@@ -45,6 +50,43 @@ app.add_middleware(
 
 SECRET_KEY = os.getenv("SECRET_KEY", "YOUR_SECRET_KEY") 
 ALGORITHM = "HS256"
+
+
+def check_and_send_reminders():
+    db = SessionLocal()
+    try:
+        hoje = date.today()
+        users = db.query(User).filter(User.role != 'Admin').all()
+        
+        for u in users:
+            report = db.query(DailyReport).filter(
+                DailyReport.user_id == u.id, 
+                DailyReport.date == hoje
+            ).first()
+            
+            if not report or report.status in ["Rascunho", "Pendente"]:
+                msg = "⚠️ Fim do dia! Não te esqueças de preencher e submeter o teu Relatório Diário."
+                
+                exists = db.query(Notification).filter(
+                    Notification.user_id == u.id, 
+                    Notification.message == msg
+                ).first()
+                
+                if not exists:
+                    db.add(Notification(user_id=u.id, message=msg))
+        
+        db.commit()
+        print("Lembretes de relatório diário processados com sucesso!")
+    except Exception as e:
+        print("Erro ao processar lembretes:", e)
+    finally:
+        db.close()
+
+scheduler = BackgroundScheduler()
+scheduler.add_job(check_and_send_reminders, 'cron', hour=17, minute=30)
+scheduler.start()
+
+
 
 @app.middleware("http")
 async def audit_log_middleware(request: Request, call_next):
@@ -120,7 +162,12 @@ def get_admin_users_reports(db: Session = Depends(get_db), current_user: User = 
     users = db.query(User).all()
     result = []
     for u in users:
-        reports = db.query(DailyReport).filter(DailyReport.user_id == u.id).order_by(DailyReport.date.desc()).all()
+        # A MUDANÇA ESTÁ AQUI: Adicionado o filtro DailyReport.status != "Rascunho"
+        reports = db.query(DailyReport).filter(
+            DailyReport.user_id == u.id,
+            DailyReport.status != "Rascunho" 
+        ).order_by(DailyReport.date.desc()).all()
+        
         reports_data = []
         
         for r in reports:
@@ -138,7 +185,6 @@ def get_admin_users_reports(db: Session = Depends(get_db), current_user: User = 
                 for l in logs:
                     hours_map[l.ticket_id] = hours_map.get(l.ticket_id, 0) + l.hours_spent
 
-                # A lista gerada já com o estado sem erros de sintaxe
                 tickets_info = [{
                     "id": t.id,
                     "title": t.title,
@@ -159,7 +205,7 @@ def get_admin_users_reports(db: Session = Depends(get_db), current_user: User = 
                 "kilometers": r.kilometers,
                 "overtime_hours": r.overtime_hours,
                 "tickets": tickets_info,
-                "rejection_reason": getattr(r, "rejection_reason", None) # Já envia o motivo para o frontend!
+                "rejection_reason": getattr(r, "rejection_reason", None)
             })
         
         result.append({
