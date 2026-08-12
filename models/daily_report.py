@@ -18,3 +18,5 @@ class DailyReport(Base):
     # Extras
     overtime_hours = Column(Float, default=0.0)
     kilometers = Column(Float, default=0.0)
+
+    rejection_reason = Column(String, nullable=True)

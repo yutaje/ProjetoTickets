@@ -100,32 +100,6 @@ app.include_router(audit.router)
 app.include_router(client.router)  
 
 
-@app.get("/admin/users-reports")
-def get_admin_users_reports(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    if getattr(current_user, "role", "Member") != "Admin":
-        raise HTTPException(status_code=403, detail="Acesso restrito.")
-    
-    users = db.query(User).all()
-    result = []
-    for u in users:
-        reports = db.query(DailyReport).filter(DailyReport.user_id == u.id).all()
-        reports_data = [{
-            "id": r.id,
-            "date": str(r.date),
-            "status": r.status,
-            "summary": r.summary,
-            "detailed_report": r.detailed_report,
-            "kilometers": r.kilometers,
-            "overtime_hours": r.overtime_hours
-        } for r in reports]
-        
-        result.append({
-            "user_id": u.id,
-            "name": u.name or u.email,
-            "email": u.email,
-            "reports": reports_data
-        })
-    return result
 
 
 @app.get("/")
@@ -135,3 +109,63 @@ def home():
 @app.get("/users/")
 def get_all_users(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     return db.query(User).all()
+
+
+@app.get("/admin/users-reports")
+def get_admin_users_reports(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    role = getattr(current_user, "role", "Member")
+    if role != "Admin":
+        raise HTTPException(status_code=403, detail="Acesso restrito a administradores.")
+    
+    users = db.query(User).all()
+    result = []
+    for u in users:
+        reports = db.query(DailyReport).filter(DailyReport.user_id == u.id).order_by(DailyReport.date.desc()).all()
+        reports_data = []
+        
+        for r in reports:
+            tickets_info = []
+            try:
+                logs = db.query(TimeLog).filter(
+                    TimeLog.user_id == u.id,
+                    TimeLog.date == r.date
+                ).all()
+                
+                ticket_ids = [l.ticket_id for l in logs]
+                tickets = db.query(Ticket).filter(Ticket.id.in_(ticket_ids)).all() if ticket_ids else []
+                
+                hours_map = {}
+                for l in logs:
+                    hours_map[l.ticket_id] = hours_map.get(l.ticket_id, 0) + l.hours_spent
+
+                # A lista gerada já com o estado sem erros de sintaxe
+                tickets_info = [{
+                    "id": t.id,
+                    "title": t.title,
+                    "status": getattr(t, "status", "To Do"),
+                    "hours_today": round(hours_map.get(t.id, 0), 2),
+                    "start_date": str(r.date),
+                    "due_date": str(r.date)
+                } for t in tickets]
+            except Exception as e:
+                print(f"Erro a processar logs do relatório {r.id}: {e}")
+
+            reports_data.append({
+                "id": r.id,
+                "date": r.date.isoformat() if hasattr(r.date, 'isoformat') else str(r.date),
+                "status": r.status,
+                "summary": r.summary,
+                "detailed_report": r.detailed_report,
+                "kilometers": r.kilometers,
+                "overtime_hours": r.overtime_hours,
+                "tickets": tickets_info,
+                "rejection_reason": getattr(r, "rejection_reason", None) # Já envia o motivo para o frontend!
+            })
+        
+        result.append({
+            "user_id": u.id,
+            "name": u.name or u.email,
+            "email": u.email,
+            "reports": reports_data
+        })
+    return result

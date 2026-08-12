@@ -206,7 +206,8 @@ def get_or_create_daily_report(
             "summary": report.summary,
             "detailed_report": report.detailed_report,
             "kilometers": report.kilometers,
-            "overtime_hours": report.overtime_hours
+            "overtime_hours": report.overtime_hours,
+            "rejection_reason": getattr(report, "rejection_reason", None)
         },
         "tickets_worked": tickets_data
     }
@@ -573,6 +574,8 @@ def update_daily_report(
     report.kilometers = report_data.get("kilometers", report.kilometers)
     report.overtime_hours = report_data.get("overtime_hours", report.overtime_hours)
     report.status = "Submetido" 
+
+    report.rejection_reason = None
     
     db.commit()
     db.refresh(report)
@@ -593,6 +596,38 @@ def reopen_daily_report(
     db.commit()
     db.refresh(report)
     return {"message": "Relatório reaberto com sucesso!"}
+
+
+@router.put("/admin/reports/{report_id}/status")
+def update_report_status_admin(
+    report_id: int,
+    status_data: dict,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    role = getattr(current_user, "role", "Member")
+    if role != "Admin":
+        raise HTTPException(status_code=403, detail="Acesso restrito.")
+        
+    report = db.query(DailyReport).filter(DailyReport.id == report_id).first()
+    if not report:
+        raise HTTPException(status_code=404, detail="Relatório não encontrado.")
+        
+    new_status = status_data.get("status")
+    reason = status_data.get("rejection_reason") # Apanha o motivo
+
+    if new_status == "Recusado":
+        report.status = "Rascunho"
+        report.rejection_reason = reason # Grava o motivo
+    else:
+        report.status = new_status
+        if new_status == "Validado":
+            report.rejection_reason = None # Limpa se foi validado
+            
+    db.commit()
+    db.refresh(report)
+    return {"message": "Estado atualizado!"}
+
 
 @router.get("/{ticket_id}/comments")
 def get_ticket_comments(
