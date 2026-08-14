@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Query, Form, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Form, UploadFile, File
 import os
 from sqlalchemy.orm import Session
 from database import get_db
@@ -10,7 +10,7 @@ from models.team import Team
 from schemas.ticket import TicketCreate, TicketUpdate, TicketResponse
 from core.security import get_current_user
 from typing import List, Optional
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
 import shutil
 from google import genai 
 import traceback
@@ -18,7 +18,6 @@ from models.notification import Notification
 from models.time_log import TimeLog
 from models.daily_report import DailyReport
 from models.comment import Comment
-from datetime import date, timedelta, datetime
 from docx import Document
 from fastapi.responses import StreamingResponse
 import io
@@ -38,23 +37,10 @@ router = APIRouter(
 def filter_tickets_by_permissions(query, current_user: User, db: Session):
     role = getattr(current_user, "role", "Member")
     
-    if role == "Admin":
+    if role in ["Admin", "Manager"]:
         return query
         
-    user_teams = db.query(Team.id).filter(
-        (Team.owner_id == current_user.id) | 
-        (Team.members.any(id=current_user.id))
-    ).statement.correlate(None)
-    
-    user_projects = db.query(Project.id).filter(
-        (Project.team_id.in_(user_teams)) | 
-        (Project.team_id.is_(None))
-    ).statement.correlate(None)
-    
-    return query.filter(
-        (Ticket.assigned_to_id == current_user.id) | 
-        (Ticket.project_id.in_(user_projects))
-    )
+    return query.filter(Ticket.assigned_to_id == current_user.id)
 
 
 @router.get("/me/stats")
@@ -126,7 +112,8 @@ def create_ticket(
         estimated_hours=ticket.estimated_hours,
         due_date=d_date,
         start_date=s_date,
-        task_type=ticket.task_type if hasattr(ticket, 'task_type') else "Geral"
+        task_type=ticket.task_type if hasattr(ticket, 'task_type') else "Geral",
+        creator_id=current_user.id 
     )
     db.add(db_ticket)
     db.commit()
@@ -155,18 +142,17 @@ def get_tickets(
     
     if search:
         query = query.filter(Ticket.title.ilike(f"%{search}%"))
-    if status:
+    if status: 
         query = query.filter(Ticket.status == status)
         
     return query.all()
 
 @router.get("/my-day/today")
 def get_or_create_daily_report(
-    target_date: Optional[str] = Query(None), # <-- Novo parâmetro
+    target_date: Optional[str] = Query(None), 
     db: Session = Depends(get_db), 
     current_user: User = Depends(get_current_user)
 ):
-    # Se vier data no pedido, usa essa, senão usa a data de hoje
     if target_date:
         today = datetime.strptime(target_date, "%Y-%m-%d").date()
     else:
@@ -190,25 +176,25 @@ def get_or_create_daily_report(
     logs = db.query(TimeLog).filter(
         TimeLog.user_id == current_user.id,
         TimeLog.date == today
-    ).all()
-    
-    hours_per_ticket = {}
-    for log in logs:
-        hours_per_ticket[log.ticket_id] = hours_per_ticket.get(log.ticket_id, 0) + log.hours_spent
-        
-    ticket_ids = list(hours_per_ticket.keys())
-    tickets_worked_today = db.query(Ticket).filter(Ticket.id.in_(ticket_ids)).all() if ticket_ids else []
+    ).order_by(TimeLog.start_time.asc()).all()
     
     tickets_data = []
-    for t in tickets_worked_today:
-        tickets_data.append({
-            "id": t.id,
-            "title": t.title,
-            "status": t.status,
-            "priority": t.priority,
-            "description": t.description,
-            "hours_today": round(hours_per_ticket[t.id], 2)
-        })
+    for log in logs:
+        t = db.query(Ticket).filter(Ticket.id == log.ticket_id).first()
+        if t:
+            start_str = log.start_time.strftime("%H:%M") if getattr(log, "start_time", None) else "--:--"
+            end_str = log.end_time.strftime("%H:%M") if getattr(log, "end_time", None) else "--:--"
+            
+            tickets_data.append({
+                "id": t.id,
+                "title": t.title,
+                "status": t.status,
+                "priority": t.priority,
+                "description": t.description,
+                "hours_today": round(log.hours_spent, 2),
+                "start_time": start_str,
+                "end_time": end_str
+            })
         
     return {
         "report": {
@@ -247,49 +233,47 @@ def get_week_status(
         nome_dia = dias_semana[current_d.weekday()]
         
         if rep:
-            status = rep.status
+            status_rep = rep.status
         else:
-            status = "Em falta" if current_d < today else "Não iniciado"
+            status_rep = "Em falta" if current_d < today else "Não iniciado"
             
         week_data.append({
             "date": current_d.isoformat(),
             "day_name": nome_dia,
             "day_num": current_d.day,
-            "status": status
+            "status": status_rep
         })
         
     return week_data
 
-@router.put("/{ticket_id}")
+@router.put("/{ticket_id}", response_model=TicketResponse)
 def update_ticket(
-    ticket_id: int,
-    ticket_data: dict,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    ticket_id: int, 
+    ticket_data: TicketUpdate, 
+    current_user: User = Depends(get_current_user), 
+    db: Session = Depends(get_db)
 ):
     ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
     if not ticket:
-        raise HTTPException(status_code=404, detail="Tarefa não encontrada.")
-    
-    session_hours = ticket_data.pop("session_hours", None)
-    
-    for key, value in ticket_data.items():
+        raise HTTPException(status_code=404, detail="Ticket não encontrado")
+
+    role = getattr(current_user, "role", "User").lower()
+    if role == "user":
+        if getattr(ticket, "creator_id", None) != current_user.id:
+            raise HTTPException(
+                status_code=403, 
+                detail="Acesso negado: Apenas podes editar os tickets criados por ti."
+            )
+
+    update_data = ticket_data.dict(exclude_unset=True)
+    for key, value in update_data.items():
         setattr(ticket, key, value)
-        
-    if session_hours and session_hours > 0:
-        new_log = TimeLog(
-            ticket_id=ticket.id,
-            user_id=current_user.id,
-            date=date.today(),
-            hours_spent=session_hours
-        )
-        db.add(new_log)
         
     db.commit()
     db.refresh(ticket)
     return ticket
 
-@router.delete("/{ticket_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{ticket_id}", status_code=204)
 def delete_ticket(
     ticket_id: int,
     db: Session = Depends(get_db),
@@ -380,8 +364,7 @@ def get_ai_focus_recommendation(
         proj_name = proj_map.get(t.project_id, "Projeto Geral")
         due_info = str(t.due_date).split('T')[0] if t.due_date else None
         
-        # CÁLCULO MATEMÁTICO DE URGÊNCIA (Para a IA ponderar sem falhar)
-        urgency_score = priority_weights.get(t.priority, 1) * 2  # Peso base da prioridade
+        urgency_score = priority_weights.get(t.priority, 1) * 2  
         
         temporal_desc = "Sem prazo definido"
         if due_info:
@@ -389,11 +372,9 @@ def get_ai_focus_recommendation(
             delta_days = (due_date_obj - today).days
             
             if delta_days < 0:
-                # Atrasada: ganha pontos pelo atraso, mas penalizada se for prioridade Baixa
                 urgency_score += abs(delta_days)
                 temporal_desc = f"Atrasada por {abs(delta_days)} dia(s)"
             elif delta_days == 0:
-                # Vence hoje: salto massivo de urgência
                 urgency_score += 15
                 temporal_desc = "Vence EXATAMENTE HOJE"
             else:
@@ -409,7 +390,6 @@ def get_ai_focus_recommendation(
             "score": urgency_score
         })
 
-    # Ordena por pontuação matemática para a IA ver quem lidera
     scored_tasks.sort(key=lambda x: x["score"], reverse=True)
 
     tasks_text = "\n".join([
@@ -454,7 +434,6 @@ def complete_ticket(
     if not db_ticket:
         raise HTTPException(status_code=404, detail="Tarefa não encontrada.")
     
-    # 1. GRAVA A DESCRIÇÃO FINAL DIRETAMENTE
     db_ticket.final_description = final_description or ""
     db_ticket.status = "Done"
     db_ticket.is_running = False
@@ -468,7 +447,6 @@ def complete_ticket(
         )
         db.add(new_log)
 
-    # 2. GRAVA O FICHEIRO NA COLUNA CORRETA (attachment_path)
     if file and file.filename:
         file_location = os.path.join(UPLOAD_DIR, file.filename)
         with open(file_location, "wb") as buffer:
@@ -483,6 +461,8 @@ def check_and_create_deadline_notifications(user: User, db: Session):
     try:
         today = date.today()
         today_str = today.isoformat()
+        current_hour = datetime.now().hour
+        
         query = db.query(Ticket)
         query = filter_tickets_by_permissions(query, user, db)
         tickets = query.filter(Ticket.status != "Done").all()
@@ -508,6 +488,25 @@ def check_and_create_deadline_notifications(user: User, db: Session):
                 if not exists:
                     db.add(Notification(user_id=user.id, message=msg))
                     
+        # 🚨 ALERTA AUTOMÁTICO DE CRONÓMETRO LIGADO APÓS AS 18:00
+        if current_hour >= 11:
+            running_tickets = db.query(Ticket).filter(
+                Ticket.assigned_to_id == user.id,
+                Ticket.is_running == True
+            ).all()
+            
+            for rt in running_tickets:
+                cron_msg = f"ALERTA: Deixaste o cronómetro ligado na tarefa '#{rt.id} - {rt.title}' após o horário de expediente!"
+                
+                exists_cron = db.query(Notification).filter(
+                    Notification.user_id == user.id, 
+                    Notification.message == cron_msg,
+                    Notification.created_at >= datetime.combine(today, datetime.min.time())
+                ).first()
+                
+                if not exists_cron:
+                    db.add(Notification(user_id=user.id, message=cron_msg))
+
         db.commit()
     except Exception as e:
         db.rollback()
@@ -530,16 +529,25 @@ def generate_daily_ai_report(db: Session = Depends(get_db), current_user: User =
     ticket_ids = list(hours_per_ticket.keys())
     tickets = db.query(Ticket).filter(Ticket.id.in_(ticket_ids)).all()
     
+    def format_duration(hours_decimal):
+        total_minutes = round(hours_decimal * 60)
+        if total_minutes < 60:
+            return f"{max(total_minutes, 1)} min"
+        h = int(total_minutes // 60)
+        m = int(total_minutes % 60)
+        return f"{h}h {m}m" if m > 0 else f"{h}h"
+
     tasks_info = []
     for t in tickets:
-        tasks_info.append(f"- Tarefa #{t.id}: {t.title} (Estado: {t.status}, Descrição: {t.description or 'N/A'}) - Tempo hoje: {hours_per_ticket[t.id]}h")
+        dur_formatada = format_duration(hours_per_ticket[t.id])
+        tasks_info.append(f"- Tarefa #{t.id}: {t.title} (Estado: {t.status}, Descrição: {t.description or 'N/A'}) - Tempo hoje: {dur_formatada}")
     
     tasks_text = "\n".join(tasks_info)
     
     prompt = f"""
     És um assistente técnico inteligente da RFS. Com base nas seguintes tarefas executadas pelo técnico no dia de hoje, gera:
     1. Um "summary" (um resumo curto e profissional de uma linha do dia).
-    2. Um "detailed_report" (um relatório detalhado estruturado com as intervenções efetuadas).
+    2. Um "detailed_report" (um relatório detalhado estruturado com as intervenções efetuadas, mantendo exatamente a formatação de tempo indicadas nas tarefas).
     
     Tarefas de hoje:
     {tasks_text}
@@ -559,7 +567,6 @@ def generate_daily_ai_report(db: Session = Depends(get_db), current_user: User =
     except Exception as e:
         print(f"AVISO: IA falhou, a usar relatório padrão. Erro: {str(e)}")
         
-        # Fallback automático estruturado para nunca deixar o técnico pendurado
         fallback_summary = f"Executadas {len(tickets)} intervenções técnicas planeadas para o dia de hoje."
         fallback_details = "RELATÓRIO DE ATIVIDADE DIÁRIA (RFS)\n\nIntervenções efetuadas:\n" + "\n".join(tasks_info)
         
@@ -578,7 +585,7 @@ def update_daily_report(
     pending_work: Optional[str] = Form(None),
     incidents: Optional[str] = Form(None),
     materials: Optional[str] = Form(None),
-    file: Optional[UploadFile] = File(None), # <- O nosso ficheiro!
+    file: Optional[UploadFile] = File(None), 
     db: Session = Depends(get_db), 
     current_user: User = Depends(get_current_user)
 ):
@@ -592,17 +599,14 @@ def update_daily_report(
     if not report:
         raise HTTPException(status_code=404, detail="Relatório não encontrado.")
         
-    # Atualizar campos de texto
     report.summary = summary
     report.detailed_report = detailed_report
     report.kilometers = kilometers
     report.overtime_hours = overtime_hours
-    # (Se tiveres estes campos no model, atualiza-os também)
     if hasattr(report, 'pending_work'): report.pending_work = pending_work
     if hasattr(report, 'incidents'): report.incidents = incidents
     if hasattr(report, 'materials'): report.materials = materials
 
-    # Guardar a imagem se ela for enviada
     if file and file.filename:
         file_location = os.path.join(UPLOAD_DIR, file.filename)
         with open(file_location, "wb") as buffer:
@@ -633,7 +637,6 @@ def reopen_daily_report(
     db.refresh(report)
     return {"message": "Relatório reaberto com sucesso!"}
 
-
 @router.put("/admin/reports/{report_id}/status")
 def update_report_status_admin(
     report_id: int,
@@ -642,8 +645,9 @@ def update_report_status_admin(
     current_user: User = Depends(get_current_user)
 ):
     role = getattr(current_user, "role", "Member")
-    if role != "Admin":
-        raise HTTPException(status_code=403, detail="Acesso restrito.")
+    
+    if role not in ["Admin", "Manager"]:
+        raise HTTPException(status_code=403, detail="Acesso restrito. Apenas Admins e Managers podem aprovar relatórios.")
         
     report = db.query(DailyReport).filter(DailyReport.id == report_id).first()
     if not report:
@@ -656,13 +660,11 @@ def update_report_status_admin(
         report.status = "Rascunho"
         report.rejection_reason = reason 
         
-        
         data_formatada = report.date.strftime("%d/%m/%Y") if hasattr(report.date, 'strftime') else str(report.date)
         
         notif_msg = f"O teu relatório do dia {data_formatada} foi recusado. Motivo: {reason}"
         nova_notificacao = Notification(user_id=report.user_id, message=notif_msg)
         db.add(nova_notificacao)
-        # ------------------------------
         
     else:
         report.status = new_status
@@ -672,7 +674,6 @@ def update_report_status_admin(
     db.commit()
     db.refresh(report)
     return {"message": "Estado atualizado com sucesso!"}
-
 
 @router.get("/{ticket_id}/comments")
 def get_ticket_comments(
@@ -728,7 +729,6 @@ def create_ticket_comment(
     db.refresh(new_comment)
     return new_comment
 
-
 @router.get("/my-day/export-pdf")
 def export_daily_report_pdf(
     target_date: Optional[str] = Query(None),
@@ -748,87 +748,106 @@ def export_daily_report_pdf(
     if not report:
         raise HTTPException(status_code=404, detail="Relatório não encontrado para esta data.")
         
-    # Gerar PDF utilizando ReportLab
+    logs = db.query(TimeLog).filter(
+        TimeLog.user_id == current_user.id,
+        TimeLog.date == report_date
+    ).order_by(TimeLog.start_time.asc()).all()
+
     buffer = io.BytesIO()
     p = canvas.Canvas(buffer, pagesize=letter)
     width, height = letter
     
-    # Cabeçalho
     p.setFont("Helvetica-Bold", 16)
-    p.drawString(50, height - 50, "Relatório Diário de Atividade")
+    p.drawString(50, height - 40, "Relatório Diário de Atividade")
     
     p.setFont("Helvetica", 10)
-    p.drawString(50, height - 75, f"Técnico: {current_user.name or current_user.email}")
-    p.drawString(50, height - 90, f"Data: {report.date}")
-    p.drawString(50, height - 105, f"Estado: {report.status}")
-    
-    # Secção de Resumo
+    p.setFillColorRGB(0.3, 0.3, 0.3)
+    p.drawString(50, height - 60, f"Técnico: {current_user.name or current_user.email}")
+    p.drawString(50, height - 74, f"Data: {report.date} | Estado: {report.status}")
+    p.setFillColorRGB(0, 0, 0)
+
     p.setFont("Helvetica-Bold", 12)
-    p.drawString(50, height - 140, "Resumo do Dia")
-    p.setFont("Helvetica", 10)
+    p.drawString(50, height - 105, "Registos de Trabalho (Horário da Escola - Por Sessão)")
     
-    # Texto multilinha simples para o resumo
-    text_object = p.beginText(50, height - 160)
-    text_object.setFont("Helvetica", 10)
+    y_pos = height - 125
+    p.setFont("Helvetica-Bold", 9)
+    p.setFillColorRGB(0.2, 0.2, 0.2)
+    p.drawString(50, y_pos, "ID")
+    p.drawString(85, y_pos, "TAREFA")
+    p.drawString(280, y_pos, "INÍCIO")
+    p.drawString(350, y_pos, "FIM")
+    p.drawString(430, y_pos, "DURAÇÃO")
+    
+    y_pos -= 5
+    p.setStrokeColorRGB(0.7, 0.7, 0.7)
+    p.line(50, y_pos, width - 50, y_pos)
+    
+    y_pos -= 15
+    p.setFont("Helvetica", 9)
+    p.setFillColorRGB(0, 0, 0)
+    
+    total_duration = 0.0
+    for log in logs:
+        t = db.query(Ticket).filter(Ticket.id == log.ticket_id).first()
+        if not t:
+            continue
+            
+        start_str = log.start_time.strftime("%H:%M") if getattr(log, "start_time", None) else "--:--"
+        end_str = log.end_time.strftime("%H:%M") if getattr(log, "end_time", None) else "--:--"
+        dur = round(log.hours_spent, 2)
+        total_duration += dur
+        
+        p.drawString(50, y_pos, str(t.id))
+        p.drawString(85, y_pos, str(t.title[:35]))
+        p.drawString(280, y_pos, start_str)
+        p.drawString(350, y_pos, end_str)
+        p.drawString(430, y_pos, f"{dur}h")
+        
+        y_pos -= 15
+        if y_pos < 100:
+            break
+
+    y_pos -= 5
+    p.line(50, y_pos, width - 50, y_pos)
+    y_pos -= 15
+    p.setFont("Helvetica-Bold", 10)
+    p.drawString(50, y_pos, f"Total Concluído: {round(total_duration, 2)}h | Quilómetros: {report.kilometers or 0} km | Horas Extra: {report.overtime_hours or 0}h")
+
+    y_pos -= 35
+    p.setFont("Helvetica-Bold", 11)
+    p.drawString(50, y_pos, "Resumo do Dia")
+    
+    y_pos -= 15
+    p.setFont("Helvetica", 9)
     summary_text = report.summary or "Sem resumo registado."
     for line in summary_text.split('\n'):
-        text_object.textLine(line)
-    p.drawText(text_object)
+        p.drawString(50, y_pos, line[:100])
+        y_pos -= 12
+        
+    y_pos -= 10
+    p.setFont("Helvetica-Bold", 11)
+    p.drawString(50, y_pos, "Relatório Detalhado")
     
-    # Secção de Relatório Detalhado
-    p.setFont("Helvetica-Bold", 12)
-    p.drawString(50, height - 240, "Relatório Detalhado")
-    
-    det_object = p.beginText(50, height - 260)
-    det_object.setFont("Helvetica", 10)
+    y_pos -= 15
+    p.setFont("Helvetica", 9)
     detailed_text = report.detailed_report or "Sem relatório detalhado."
     for line in detailed_text.split('\n'):
-        det_object.textLine(line)
-    p.drawText(det_object)
-    
+        clean_line = line.replace('■', '-').replace('\r', '')
+        p.drawString(50, y_pos, clean_line[:100])
+        y_pos -= 12
+        if y_pos < 40:
+            break
+
     p.showPage()
     p.save()
     
     buffer.seek(0)
-    
     filename = f"Relatorio_{report.date}.pdf"
     
     return StreamingResponse(
         buffer,
         media_type="application/pdf",
         headers={"Content-Disposition": f"attachment; filename={filename}"}
-    )
-
-
-@router.get("/my-day/export-pdf")
-def export_daily_report_pdf(
-    target_date: Optional[str] = Query(None),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    if target_date:
-        report_date = datetime.strptime(target_date, "%Y-%m-%d").date()
-    else:
-        report_date = date.today()
-        
-    report = db.query(DailyReport).filter(
-        DailyReport.user_id == current_user.id,
-        DailyReport.date == report_date
-    ).first()
-    
-    if not report:
-        raise HTTPException(status_code=404, detail="Relatório não encontrado para esta data.")
-        
-    # Aqui podes usar a tua lógica atual de geração de PDF (ReportLab, etc.)
-    # Exemplo simulado de stream de PDF caso já tenhas uma função para isto:
-    buffer = io.BytesIO()
-    buffer.write(f"Relatorio PDF - Data: {report.date} - Tecnico: {current_user.name}".encode('utf-8'))
-    buffer.seek(0)
-    
-    return StreamingResponse(
-        buffer,
-        media_type="application/pdf",
-        headers={"Content-Disposition": f"attachment; filename=Relatorio_{report.date}.pdf"}
     )
 
 @router.get("/my-day/export-word")
@@ -866,3 +885,61 @@ def export_daily_report_word(
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         headers={"Content-Disposition": f"attachment; filename=Relatorio_{report.date}.docx"}
     )
+
+@router.put("/{ticket_id}/grab", response_model=TicketResponse)
+def grab_ticket(
+    ticket_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Tarefa não encontrada")
+        
+    if ticket.assigned_to_id is not None and ticket.assigned_to_id != current_user.id:
+        raise HTTPException(
+            status_code=400, 
+            detail="Tarde demais! Esta tarefa já foi atribuída a outro colega."
+        )
+        
+    ticket.assigned_to_id = current_user.id
+    ticket.status = "In Progress"
+    
+    db.commit()
+    db.refresh(ticket)
+    return ticket
+
+@router.post("/{ticket_id}/stop-timer", response_model=TicketResponse)
+def stop_timer(
+    ticket_id: int,
+    timer_data: dict, 
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Tarefa não encontrada")
+
+    ticket.is_running = False
+    if "tracked_hours" in timer_data:
+        ticket.tracked_hours = timer_data["tracked_hours"]
+
+    start_str = timer_data.get("start_time")
+    end_str = timer_data.get("end_time")
+    
+    start_dt = datetime.fromisoformat(start_str.replace("Z", "+00:00")) if start_str else None
+    end_dt = datetime.fromisoformat(end_str.replace("Z", "+00:00")) if end_str else None
+
+    new_log = TimeLog(
+        ticket_id=ticket.id,
+        user_id=current_user.id,
+        date=date.today(),
+        hours_spent=timer_data.get("session_hours", 0.0),
+        start_time=start_dt,
+        end_time=end_dt
+    )
+    
+    db.add(new_log)
+    db.commit()
+    db.refresh(ticket)
+    return ticket

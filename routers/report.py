@@ -20,10 +20,10 @@ def export_worklogs_csv(
     current_user: User = Depends(get_current_user)
 ):
     role = getattr(current_user, "role", "Member")
-    if role != "Admin":
+    if role not in ["Admin", "Manager"]:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Apenas Administradores podem exportar relatórios globais."
+            detail="Apenas Administradores e Managers podem exportar relatórios globais."
         )
 
     # Consulta que junta os utilizadores e soma todas as horas de cada um
@@ -57,3 +57,29 @@ def export_worklogs_csv(
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=relatorio_total_horas_utilizador.csv"}
     )
+
+
+@router.put("/{log_id}/validate")
+def validate_worklog(
+    log_id: int, 
+    current_user: User = Depends(get_current_user), 
+    db: Session = Depends(get_db)
+):
+    # 1. VERIFICAÇÃO DE HIERARQUIA
+    role = getattr(current_user, "role", "Member")
+    if role not in ["Admin", "Manager"]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, 
+            detail="Acesso negado: Apenas Managers e Administradores podem validar registos."
+        )
+
+    # 2. PROCURAR O REGISTO NA BD
+    worklog = db.query(WorkLog).filter(WorkLog.id == log_id).first()
+    if not worklog:
+        raise HTTPException(status_code=404, detail="Registo de trabalho não encontrado")
+        
+    # 3. APROVAR (Precisas de garantir que o modelo WorkLog tem uma coluna 'status')
+    worklog.status = "Validado"
+    db.commit()
+    
+    return {"message": f"Registo {log_id} validado com sucesso!"}

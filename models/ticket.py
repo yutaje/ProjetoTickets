@@ -31,3 +31,5 @@ class Ticket(Base):
     
     comments = relationship("Comment", back_populates="ticket", cascade="all, delete-orphan")
     client_id = Column(Integer, ForeignKey("clients.id"), nullable=True)
+
+    creator_id = Column(Integer, ForeignKey("users.id"))

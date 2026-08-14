@@ -6,7 +6,7 @@ class TicketCreate(BaseModel):
     title: str
     description: Optional[str] = None
     priority: Optional[str] = "Média"
-    status: Optional[str] = "To Do"
+    status: Optional[str] = "To Do" # No futuro, podemos mudar para "Pendente" no React
     project_id: Optional[int] = None
     client_id: Optional[int] = None
     assigned_to_id: Optional[int] = None
@@ -14,6 +14,9 @@ class TicketCreate(BaseModel):
     due_date: Optional[date] = None
     start_date: Optional[date] = None
     task_type: Optional[str] = "Geral"
+    
+    # --- NOVA LINHA: Quem está a criar a tarefa ---
+    creator_id: Optional[int] = None
 
 class TicketUpdate(BaseModel):
     title: Optional[str] = None
@@ -30,6 +33,9 @@ class TicketUpdate(BaseModel):
     is_running: Optional[bool] = None
     session_hours: Optional[float] = None
     task_type: Optional[str] = None
+    
+    # --- NOVA LINHA: Caso um Admin precise de transferir o dono da tarefa ---
+    creator_id: Optional[int] = None
 
 class TicketResponse(BaseModel):
     id: int
@@ -50,6 +56,9 @@ class TicketResponse(BaseModel):
     attachment_path: Optional[str] = None
     attachment_url: Optional[str] = None
     task_type: Optional[str] = None
+    
+    # --- NOVA LINHA: Para o React bloquear botões se o user não for o criador ---
+    creator_id: Optional[int] = None
 
     class Config:
         from_attributes = True
