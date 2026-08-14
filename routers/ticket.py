@@ -176,24 +176,25 @@ def get_or_create_daily_report(
     logs = db.query(TimeLog).filter(
         TimeLog.user_id == current_user.id,
         TimeLog.date == today
-    ).order_by(TimeLog.start_time.asc()).all()
+    ).all()
     
-    tickets_data = []
+    # 🧠 AGRUPAR POR TAREFA E SOMAR AS HORAS (Ignorando valores a 0 ou insignificantes)
+    ticket_hours_map = {}
     for log in logs:
-        t = db.query(Ticket).filter(Ticket.id == log.ticket_id).first()
-        if t:
-            start_str = log.start_time.strftime("%H:%M") if getattr(log, "start_time", None) else "--:--"
-            end_str = log.end_time.strftime("%H:%M") if getattr(log, "end_time", None) else "--:--"
+        if log.ticket_id and log.hours_spent > 0.001:  # Ignora registos a zero
+            ticket_hours_map[log.ticket_id] = ticket_hours_map.get(log.ticket_id, 0.0) + log.hours_spent
             
+    tickets_data = []
+    for ticket_id, total_hours in ticket_hours_map.items():
+        t = db.query(Ticket).filter(Ticket.id == ticket_id).first()
+        if t:
             tickets_data.append({
                 "id": t.id,
                 "title": t.title,
                 "status": t.status,
                 "priority": t.priority,
                 "description": t.description,
-                "hours_today": round(log.hours_spent, 2),
-                "start_time": start_str,
-                "end_time": end_str
+                "hours_today": round(total_hours, 2) # Soma limpa e arredondada
             })
         
     return {
@@ -489,7 +490,7 @@ def check_and_create_deadline_notifications(user: User, db: Session):
                     db.add(Notification(user_id=user.id, message=msg))
                     
         # 🚨 ALERTA AUTOMÁTICO DE CRONÓMETRO LIGADO APÓS AS 18:00
-        if current_hour >= 11:
+        if current_hour >= 18:
             running_tickets = db.query(Ticket).filter(
                 Ticket.assigned_to_id == user.id,
                 Ticket.is_running == True
