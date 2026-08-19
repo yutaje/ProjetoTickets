@@ -1,0 +1,20 @@
+1 Gestão de permissões e perfis
+	
+	exato, um admin vai ficar apenas com as funcionalidades de admin, e passamos parte dos relatorios diarios para o manager
+	os users normais só vão conseguir editar os tickets que foram criados por ele mesmo, os admin e managers conseguem editar tarefas de toda a gente
+
+
+2 Chat artilhado, e AI todo terreno
+	
+	vamos ter de ter usar a AI para se quisermos resumir um chat ou quiser saber tudo o que o Joao disse nesse chat, termos também funcionalidade para procurar no proprio chat e afixar mensagens
+
+
+3 workflow de equipas, categorias e task pool 
+	
+	vamos mudar o estado "a fazer" para "pendente", ao darmos a uma equipa 5 tarefas o primeiro a carregar para trabalhar na tarefa x, essa tarefa fica tipo bloqueada para os outros users da equipa e aparece que o user x ja esta a tratar dessa tarefa
+
+
+4 Controlo alertas e auditoria nas tarefas	
+
+	exato, ter um script a correr que a x horas diz que ainda temos uma tarefa que está com o cronometro ligado para o pessoal nao se esquecer e deixar tarefas ativas durante a noite toda
+	se iniciar o clock de uma tarefa as 9 e parar as 9:10 ele guarda esse tempo, tanto a hora de inicio como a hora de fim, assim os relatorios do dia em vez de terem o total de horas que passei na tarefa, tem tipo o resumo do meu dia com a ordem das tarefas que fui fazendo e fica registado como se fosse um horario da escola, e guarda também o tempo total que passeo

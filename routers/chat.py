@@ -1,4 +1,4 @@
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from database import get_db
@@ -7,6 +7,10 @@ from models.user import User
 from websocket_manager import manager
 import json
 from datetime import datetime
+import os
+from google import genai
+
+client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 router = APIRouter(prefix="/chat", tags=["Chat"])
 
@@ -32,7 +36,6 @@ def get_user_rooms(user_id: int, db: Session = Depends(get_db)):
             .order_by(Message.created_at.desc())\
             .first()
             
-        # NOVA PARTE: Conta quantas mensagens não lidas existem APENAS nesta sala
         unread = db.query(func.count(Message.id))\
             .filter(Message.room_id == room.id)\
             .filter(Message.sender_id != user_id)\
@@ -46,7 +49,7 @@ def get_user_rooms(user_id: int, db: Session = Depends(get_db)):
             "last_message": last_msg.content if last_msg else "Conversa iniciada",
             "last_time": last_msg.created_at.strftime("%H:%M") if last_msg else "",
             "timestamp": last_msg.created_at if last_msg else datetime.min,
-            "unread_count": unread or 0  # <--- Enviamos isto para o React!
+            "unread_count": unread or 0
         })
         
     result.sort(key=lambda x: x["timestamp"], reverse=True)
@@ -107,10 +110,8 @@ async def chat_websocket(websocket: WebSocket, room_id: int, user_id: int, db: S
 
 @router.get("/unread-count")
 def get_unread_count(user_id: int, db: Session = Depends(get_db)):
-    # 1. Descobrir em que salas o utilizador está
     user_rooms = db.query(RoomMember.room_id).filter(RoomMember.user_id == user_id).subquery()
     
-    # 2. Contar quantas mensagens nessas salas NÃO foram enviadas por ele e estão com is_read == 0
     unread = db.query(func.count(Message.id))\
         .filter(Message.room_id.in_(user_rooms))\
         .filter(Message.sender_id != user_id)\
@@ -121,7 +122,6 @@ def get_unread_count(user_id: int, db: Session = Depends(get_db)):
 
 @router.put("/rooms/{room_id}/read")
 def mark_room_as_read(room_id: int, user_id: int, db: Session = Depends(get_db)):
-    # Marca todas as mensagens não lidas desta sala (que não foram enviadas pelo user) como lidas
     db.query(Message).filter(
         Message.room_id == room_id,
         Message.sender_id != user_id,
@@ -130,3 +130,27 @@ def mark_room_as_read(room_id: int, user_id: int, db: Session = Depends(get_db))
     
     db.commit()
     return {"success": True}
+
+@router.post("/summarize")
+def summarize_chat(data: dict):
+    prompt_text = data.get("prompt")
+    if not prompt_text:
+        raise HTTPException(status_code=400, detail="Prompt em falta.")
+    
+    # Lista de modelos por ordem de tentativa (fallback automático)
+    models_to_try = ['gemini-2.5-flash', 'gemini-flash-latest', 'gemini-3.1-pro-preview']
+    
+    last_error = None
+    for m in models_to_try:
+        try:
+            response = client.models.generate_content(
+                model=m,
+                contents=prompt_text,
+            )
+            return {"summary": response.text}
+        except Exception as e:
+            last_error = str(e)
+            continue 
+            
+    print(f"ERRO CRÍTICO NA IA DO CHAT: {last_error}")
+    raise HTTPException(status_code=500, detail="A IA está temporariamente indisponível devido a alta procura. Tenta novamente em segundos.")

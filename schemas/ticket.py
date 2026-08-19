@@ -17,6 +17,7 @@ class TicketCreate(BaseModel):
     
     # --- NOVA LINHA: Quem está a criar a tarefa ---
     creator_id: Optional[int] = None
+    blocked_by_id: Optional[int] = None
 
 class TicketUpdate(BaseModel):
     title: Optional[str] = None
@@ -33,6 +34,7 @@ class TicketUpdate(BaseModel):
     is_running: Optional[bool] = None
     session_hours: Optional[float] = None
     task_type: Optional[str] = None
+    blocked_by_id: Optional[int] = None
     
     # --- NOVA LINHA: Caso um Admin precise de transferir o dono da tarefa ---
     creator_id: Optional[int] = None

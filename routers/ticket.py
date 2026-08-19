@@ -2,11 +2,12 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query, Form, Uplo
 import os
 from sqlalchemy.orm import Session
 from database import get_db
-from models.ticket import Ticket
+from models.ticket import Ticket, SubTask
 from models.user import User
 from models.worklog import WorkLog
 from models.project import Project
 from models.team import Team
+from models.audit_log import AuditLog
 from schemas.ticket import TicketCreate, TicketUpdate, TicketResponse
 from core.security import get_current_user
 from typing import List, Optional
@@ -18,6 +19,7 @@ from models.notification import Notification
 from models.time_log import TimeLog
 from models.daily_report import DailyReport
 from models.comment import Comment
+from models.task_type import TaskType  
 from docx import Document
 from fastapi.responses import StreamingResponse
 import io
@@ -34,14 +36,34 @@ router = APIRouter(
     tags=["Tickets"]
 )
 
-def filter_tickets_by_permissions(query, current_user: User, db: Session):
-    role = getattr(current_user, "role", "Member")
-    
-    if role in ["Admin", "Manager"]:
-        return query
-        
-    return query.filter(Ticket.assigned_to_id == current_user.id)
+def format_to_hhmm(hours_float: float) -> str:
+    if not hours_float or hours_float <= 0:
+        return "00:00"
+    total_minutes = round(hours_float * 60)
+    h = int(total_minutes // 60)
+    m = int(total_minutes % 60)
+    return f"{h:02d}:{m:02d}"
 
+def log_action(db: Session, user_id: int, action: str, details: str, ticket_id: int = None, project_id: int = None):
+    try:
+        audit = AuditLog(
+            user_id=user_id,
+            action=action,
+            details=details,
+            ticket_id=ticket_id,
+            project_id=project_id,
+            created_at=datetime.now()
+        )
+        db.add(audit)
+        db.commit()
+    except Exception as e:
+        print(f"Erro ao gravar log de auditoria: {e}")
+
+def filter_tickets_by_permissions(query, current_user: User, db: Session):
+    role = getattr(current_user, "role", "Member").lower()
+    if role in ["admin", "manager", "gestor de operações"]:
+        return query
+    return query.filter(Ticket.assigned_to_id == current_user.id)
 
 @router.get("/me/stats")
 def get_my_stats(
@@ -80,7 +102,7 @@ def get_my_stats(
         "done": done,
         "overdue": overdue,
         "due_today": due_today,
-        "hours_today": round(hours_today, 2)
+        "hours_today": format_to_hhmm(hours_today)
     }
 
 @router.get("/active", response_model=List[TicketResponse])
@@ -92,12 +114,104 @@ def get_active_tickets(
     query = filter_tickets_by_permissions(query, current_user, db)
     return query.all()
 
+@router.get("/statistics/chart-hours")
+def get_chart_hours(
+    period: str = Query("7"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    role = getattr(current_user, "role", "Member").lower()
+    today = date.today()
+    
+    log_query = db.query(TimeLog)
+    if role not in ["admin", "manager", "gestor de operações"]:
+        log_query = log_query.filter(TimeLog.user_id == current_user.id)
+        
+    if str(period).lower() in ["7", "30", "1", "week", "last_week"]:
+        num_days = 7 if str(period).lower() in ["7", "1", "week", "last_week"] else int(period)
+        start_date = today - timedelta(days=num_days - 1)
+        
+        logs = log_query.filter(TimeLog.date >= start_date).all()
+        
+        days_array = [start_date + timedelta(days=i) for i in range(num_days)]
+        hours_map = {d.isoformat(): 0.0 for d in days_array}
+        
+        for log in logs:
+            if log.date:
+                log_d = log.date.date() if hasattr(log.date, 'date') else log.date
+                d_str = log_d.isoformat()
+                if d_str in hours_map and log_d <= today:
+                    hours_map[d_str] += (log.hours_spent or 0.0)
+                    
+        labels = [f"{d.strftime('%d/%m')}" for d in days_array]
+        hours_data = [round(hours_map[d.isoformat()], 2) for d in days_array]
+        
+        return {"labels": labels, "hours": hours_data}
+    else:
+        start_month_date = today - timedelta(days=180)
+        logs = log_query.filter(TimeLog.date >= start_month_date).all()
+        
+        months_keys = []
+        for i in range(6):
+            m_offset = 5 - i
+            y = today.year
+            m = today.month - m_offset
+            while m <= 0:
+                m += 12
+                y -= 1
+            months_keys.append((y, m))
+            
+        months_map = {f"{y}-{str(m).zfill(2)}": 0.0 for y, m in months_keys}
+        
+        for log in logs:
+            if log.date:
+                log_date_obj = log.date.date() if hasattr(log.date, 'date') else log.date
+                key = f"{log_date_obj.year}-{str(log_date_obj.month).zfill(2)}"
+                if key in months_map and log_date_obj <= today:
+                    months_map[key] += (log.hours_spent or 0.0)
+                    
+        labels = [f"{str(m).zfill(2)}/{str(y)[2:]}" for y, m in months_keys]
+        hours_data = [round(months_map[f"{y}-{str(m).zfill(2)}"], 2) for y, m in months_keys]
+        
+        return {"labels": labels, "hours": hours_data}
+
+@router.get("/project/{project_id}", response_model=List[TicketResponse])
+def get_project_tickets(
+    project_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Projeto não encontrado.")
+    
+    tickets = db.query(Ticket).filter(Ticket.project_id == project_id).all()
+    return tickets
+
 @router.post("/", response_model=TicketResponse, status_code=status.HTTP_201_CREATED)
 def create_ticket(
     ticket: TicketCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    if not ticket.description or ticket.description.strip() == "":
+        raise HTTPException(status_code=400, detail="A descrição da tarefa é um campo obrigatório.")
+
+    role = getattr(current_user, "role", "Member").lower()
+    
+    if role in ["user", "member", "técnico"]:
+        assigned_id = current_user.id
+        proj_id = None
+    else:
+        assigned_id = ticket.assigned_to_id
+        proj_id = ticket.project_id if ticket.project_id else None
+
+    blocked_id = getattr(ticket, 'blocked_by_id', None)
+    if blocked_id:
+        prereq = db.query(Ticket).filter(Ticket.id == blocked_id).first()
+        if not prereq:
+            raise HTTPException(status_code=400, detail="A tarefa antecedente especificada não existe.")
+
     s_date = ticket.start_date if ticket.start_date else None
     d_date = ticket.due_date if ticket.due_date else None
 
@@ -106,18 +220,21 @@ def create_ticket(
         description=ticket.description,
         priority=ticket.priority,
         status=ticket.status,
-        project_id=ticket.project_id if ticket.project_id else None,
+        project_id=proj_id,
         client_id=ticket.client_id,
-        assigned_to_id=ticket.assigned_to_id,
+        assigned_to_id=assigned_id,
         estimated_hours=ticket.estimated_hours,
         due_date=d_date,
         start_date=s_date,
         task_type=ticket.task_type if hasattr(ticket, 'task_type') else "Geral",
+        blocked_by_id=blocked_id,
         creator_id=current_user.id 
     )
     db.add(db_ticket)
     db.commit()
     db.refresh(db_ticket)
+    
+    log_action(db, current_user.id, "Criação de Tarefa", f"Criou a tarefa #{db_ticket.id} - {db_ticket.title}", ticket_id=db_ticket.id, project_id=proj_id)
     
     if db_ticket.assigned_to_id and db_ticket.assigned_to_id != current_user.id:
         notif = Notification(
@@ -138,7 +255,9 @@ def get_tickets(
 ):
     check_and_create_deadline_notifications(current_user, db)
     query = db.query(Ticket)
-    query = filter_tickets_by_permissions(query, current_user, db)
+    role = getattr(current_user, "role", "Member").lower()
+    if role in ["user", "member", "técnico"]:
+        query = query.filter(Ticket.assigned_to_id == current_user.id)
     
     if search:
         query = query.filter(Ticket.title.ilike(f"%{search}%"))
@@ -178,10 +297,9 @@ def get_or_create_daily_report(
         TimeLog.date == today
     ).all()
     
-    # 🧠 AGRUPAR POR TAREFA E SOMAR AS HORAS (Ignorando valores a 0 ou insignificantes)
     ticket_hours_map = {}
     for log in logs:
-        if log.ticket_id and log.hours_spent > 0.001:  # Ignora registos a zero
+        if log.ticket_id and log.hours_spent > 0.001:
             ticket_hours_map[log.ticket_id] = ticket_hours_map.get(log.ticket_id, 0.0) + log.hours_spent
             
     tickets_data = []
@@ -194,7 +312,7 @@ def get_or_create_daily_report(
                 "status": t.status,
                 "priority": t.priority,
                 "description": t.description,
-                "hours_today": round(total_hours, 2) # Soma limpa e arredondada
+                "hours_today": format_to_hhmm(total_hours)
             })
         
     return {
@@ -258,20 +376,36 @@ def update_ticket(
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket não encontrado")
 
-    role = getattr(current_user, "role", "User").lower()
-    if role == "user":
-        if getattr(ticket, "creator_id", None) != current_user.id:
-            raise HTTPException(
-                status_code=403, 
-                detail="Acesso negado: Apenas podes editar os tickets criados por ti."
-            )
+    role = getattr(current_user, "role", "Member").lower()
+    if role not in ["admin", "manager", "gestor de operações"]:
+        creator_id = getattr(ticket, "creator_id", None)
+        assigned_id = getattr(ticket, "assigned_to_id", None)
+        if creator_id != current_user.id and assigned_id != current_user.id:
+            raise HTTPException(status_code=403, detail="Acesso negado: Não podes editar esta tarefa.")
 
     update_data = ticket_data.dict(exclude_unset=True)
+    if "description" in update_data and (not update_data["description"] or update_data["description"].strip() == ""):
+        raise HTTPException(status_code=400, detail="A descrição da tarefa não pode estar vazia.")
+
+    target_status = update_data.get("status")
+    target_blocked = update_data.get("blocked_by_id", ticket.blocked_by_id)
+    
+    if target_blocked and target_status and target_status.lower() in ['in progress', 'em progresso', 'in review', 'em revisão']:
+        prereq = db.query(Ticket).filter(Ticket.id == target_blocked).first()
+        if prereq and prereq.status.lower() not in ['done', 'concluído', 'concluido']:
+            raise HTTPException(
+                status_code=400,
+                detail=f"⚠️ Esta tarefa depende da conclusão da tarefa #{prereq.id} ('{prereq.title}') e ainda não pode ser iniciada."
+            )
+
+    old_status = ticket.status
     for key, value in update_data.items():
         setattr(ticket, key, value)
         
     db.commit()
     db.refresh(ticket)
+    
+    log_action(db, current_user.id, "Atualização de Tarefa", f"Alterou a tarefa #{ticket.id}. Estado anterior: {old_status} -> Novo estado: {ticket.status}", ticket_id=ticket.id, project_id=ticket.project_id)
     return ticket
 
 @router.delete("/{ticket_id}", status_code=204)
@@ -287,6 +421,7 @@ def delete_ticket(
     if not db_ticket:
         raise HTTPException(status_code=404, detail="Tarefa não encontrada ou não tens permissão para apagá-la.")
     
+    log_action(db, current_user.id, "Eliminação de Tarefa", f"Apagou a tarefa #{db_ticket.id} - {db_ticket.title}", ticket_id=db_ticket.id)
     db.delete(db_ticket)
     db.commit()
     return None
@@ -456,6 +591,8 @@ def complete_ticket(
 
     db.commit()
     db.refresh(db_ticket)
+    
+    log_action(db, current_user.id, "Conclusão de Tarefa", f"Concluiu a tarefa #{db_ticket.id} - {db_ticket.title}", ticket_id=db_ticket.id)
     return db_ticket
 
 def check_and_create_deadline_notifications(user: User, db: Session):
@@ -489,7 +626,6 @@ def check_and_create_deadline_notifications(user: User, db: Session):
                 if not exists:
                     db.add(Notification(user_id=user.id, message=msg))
                     
-        # 🚨 ALERTA AUTOMÁTICO DE CRONÓMETRO LIGADO APÓS AS 18:00
         if current_hour >= 18:
             running_tickets = db.query(Ticket).filter(
                 Ticket.assigned_to_id == user.id,
@@ -529,18 +665,10 @@ def generate_daily_ai_report(db: Session = Depends(get_db), current_user: User =
         
     ticket_ids = list(hours_per_ticket.keys())
     tickets = db.query(Ticket).filter(Ticket.id.in_(ticket_ids)).all()
-    
-    def format_duration(hours_decimal):
-        total_minutes = round(hours_decimal * 60)
-        if total_minutes < 60:
-            return f"{max(total_minutes, 1)} min"
-        h = int(total_minutes // 60)
-        m = int(total_minutes % 60)
-        return f"{h}h {m}m" if m > 0 else f"{h}h"
 
     tasks_info = []
     for t in tickets:
-        dur_formatada = format_duration(hours_per_ticket[t.id])
+        dur_formatada = format_to_hhmm(hours_per_ticket[t.id])
         tasks_info.append(f"- Tarefa #{t.id}: {t.title} (Estado: {t.status}, Descrição: {t.description or 'N/A'}) - Tempo hoje: {dur_formatada}")
     
     tasks_text = "\n".join(tasks_info)
@@ -795,14 +923,14 @@ def export_daily_report_pdf(
             
         start_str = log.start_time.strftime("%H:%M") if getattr(log, "start_time", None) else "--:--"
         end_str = log.end_time.strftime("%H:%M") if getattr(log, "end_time", None) else "--:--"
-        dur = round(log.hours_spent, 2)
-        total_duration += dur
+        dur_float = round(log.hours_spent, 2)
+        total_duration += dur_float
         
         p.drawString(50, y_pos, str(t.id))
         p.drawString(85, y_pos, str(t.title[:35]))
         p.drawString(280, y_pos, start_str)
         p.drawString(350, y_pos, end_str)
-        p.drawString(430, y_pos, f"{dur}h")
+        p.drawString(430, y_pos, format_to_hhmm(dur_float))
         
         y_pos -= 15
         if y_pos < 100:
@@ -812,7 +940,7 @@ def export_daily_report_pdf(
     p.line(50, y_pos, width - 50, y_pos)
     y_pos -= 15
     p.setFont("Helvetica-Bold", 10)
-    p.drawString(50, y_pos, f"Total Concluído: {round(total_duration, 2)}h | Quilómetros: {report.kilometers or 0} km | Horas Extra: {report.overtime_hours or 0}h")
+    p.drawString(50, y_pos, f"Total Concluído: {format_to_hhmm(total_duration)} | Quilómetros: {report.kilometers or 0} km | Horas Extra: {report.overtime_hours or 0}h")
 
     y_pos -= 35
     p.setFont("Helvetica-Bold", 11)
@@ -897,6 +1025,14 @@ def grab_ticket(
     if not ticket:
         raise HTTPException(status_code=404, detail="Tarefa não encontrada")
         
+    if ticket.blocked_by_id:
+        prereq = db.query(Ticket).filter(Ticket.id == ticket.blocked_by_id).first()
+        if prereq and prereq.status.lower() not in ['done', 'concluído', 'concluido']:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Não podes agarrar esta tarefa! A dependência #{prereq.id} ('{prereq.title}') ainda não está concluída."
+            )
+
     if ticket.assigned_to_id is not None and ticket.assigned_to_id != current_user.id:
         raise HTTPException(
             status_code=400, 
@@ -908,6 +1044,7 @@ def grab_ticket(
     
     db.commit()
     db.refresh(ticket)
+    log_action(db, current_user.id, "Agarrar Tarefa", f"Agarrou a tarefa #{ticket.id}", ticket_id=ticket.id)
     return ticket
 
 @router.post("/{ticket_id}/stop-timer", response_model=TicketResponse)
@@ -943,4 +1080,205 @@ def stop_timer(
     db.add(new_log)
     db.commit()
     db.refresh(ticket)
+    return ticket
+
+# ==========================================
+# GESTÃO DE SUBTAREFAS
+# ==========================================
+
+@router.get("/{ticket_id}/subtasks")
+def get_subtasks(ticket_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    subtasks = db.query(SubTask).filter(SubTask.ticket_id == ticket_id).all()
+    return [{"id": s.id, "title": s.title, "is_completed": s.is_completed} for s in subtasks]
+
+@router.post("/{ticket_id}/subtasks")
+def create_subtask(ticket_id: int, data: dict, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    title = data.get("title")
+    if not title or title.strip() == "":
+        raise HTTPException(status_code=400, detail="O título da subtarefa é obrigatório.")
+    
+    ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Tarefa principal não encontrada.")
+        
+    sub = SubTask(ticket_id=ticket_id, title=title, is_completed=False)
+    db.add(sub)
+    db.commit()
+    db.refresh(sub)
+    return {"id": sub.id, "title": sub.title, "is_completed": sub.is_completed}
+
+@router.put("/subtasks/{subtask_id}")
+def update_subtask(subtask_id: int, data: dict, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    sub = db.query(SubTask).filter(SubTask.id == subtask_id).first()
+    if not sub:
+        raise HTTPException(status_code=404, detail="Subtarefa não encontrada.")
+        
+    if "is_completed" in data:
+        sub.is_completed = bool(data["is_completed"])
+    if "title" in data:
+        sub.title = data["title"]
+        
+    db.commit()
+    db.refresh(sub)
+    return {"id": sub.id, "title": sub.title, "is_completed": sub.is_completed}
+
+@router.delete("/subtasks/{subtask_id}", status_code=204)
+def delete_subtask(subtask_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    sub = db.query(SubTask).filter(SubTask.id == subtask_id).first()
+    if not sub:
+        raise HTTPException(status_code=404, detail="Subtarefa não encontrada.")
+        
+    db.delete(sub)
+    db.commit()
+    return None
+
+# ==========================================
+# TIPOS DE TAREFA E ADMIN RELATÓRIOS
+# ==========================================
+
+from pydantic import BaseModel
+
+class TaskTypeCreateSchema(BaseModel):
+    name: str
+
+class TaskTypeUpdateSchema(BaseModel):
+    new_name: str
+
+@router.get("/task-types/list")
+def get_global_task_types(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    db_types = db.query(TaskType).all()
+    return [{"id": t.id, "name": t.name} for t in db_types]
+
+@router.post("/task-types/create")
+def create_global_task_type(
+    task_type: TaskTypeCreateSchema,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    role = getattr(current_user, "role", "Member")
+    if role not in ["Admin", "Manager"]:
+        raise HTTPException(status_code=403, detail="Apenas Managers ou Admins podem criar tipos de tarefa.")
+    
+    normalized_name = task_type.name.strip().capitalize()
+    
+    existing = db.query(TaskType).filter(TaskType.name == normalized_name).first()
+    if existing:
+        return {"message": "Tipo já existe", "name": normalized_name}
+    
+    new_type = TaskType(name=normalized_name)
+    db.add(new_type)
+    db.commit()
+    db.refresh(new_type)
+    return {"message": "Tipo criado com sucesso", "name": new_type.name}
+
+@router.delete("/task-types/{type_id}", status_code=204)
+def delete_global_task_type(
+    type_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    role = getattr(current_user, "role", "Member")
+    if role not in ["Admin", "Manager"]:
+        raise HTTPException(status_code=403, detail="Apenas Managers ou Admins podem apagar tipos de tarefa.")
+        
+    db_type = db.query(TaskType).filter(TaskType.id == type_id).first()
+    if not db_type:
+        raise HTTPException(status_code=404, detail="Tipo de tarefa não encontrado.")
+        
+    db.delete(db_type)
+    db.commit()
+    return None
+
+@router.get("/admin/reports/users-status")
+def get_admin_users_reports_status(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    role = getattr(current_user, "role", "Member")
+    if role not in ["Admin", "Manager"]:
+        raise HTTPException(status_code=403, detail="Acesso negado.")
+
+    users = db.query(User).all()
+    result = []
+    
+    for u in users:
+        reports = db.query(DailyReport).filter(
+            DailyReport.user_id == u.id,
+            DailyReport.status.in_(["Submetido", "Validado"])
+        ).all()
+        
+        if not reports:
+            continue
+        
+        reports_list = []
+        for r in reports:
+            reports_list.append({
+                "id": r.id,
+                "date": r.date.isoformat() if hasattr(r.date, 'isoformat') else str(r.date),
+                "status": r.status,
+                "summary": r.summary or "",
+                "detailed_report": r.detailed_report or "",
+                "kilometers": r.kilometers or 0.0,
+                "overtime_hours": r.overtime_hours or 0.0,
+                "image_path": getattr(r, "image_path", None),
+                "submitted_at": r.submitted_at.isoformat() if getattr(r, "submitted_at", None) else None,
+                "rejection_reason": getattr(r, "rejection_reason", None)
+            })
+
+        result.append({
+            "user_id": u.id,
+            "name": u.name or u.email,
+            "email": u.email,
+            "role": getattr(u, "role", "Member"),
+            "reports": reports_list
+        })
+
+    return result
+
+@router.post("/{ticket_id}/return")
+def return_ticket(ticket_id: int, data: dict, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    reason = data.get("reason")
+    if not reason or reason.strip() == "":
+        raise HTTPException(status_code=400, detail="É obrigatório indicar um motivo/descrição para devolver a tarefa.")
+    
+    ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Tarefa não encontrada.")
+        
+    ticket.status = "To Do"
+    ticket.assigned_to_id = None
+    ticket.is_running = False
+    ticket.return_reason = reason
+    
+    db.commit()
+    log_action(db, current_user.id, "Devolução de Tarefa (Divórcio)", f"Devolveu a tarefa #{ticket.id}. Motivo: {reason}", ticket_id=ticket.id)
+    return {"success": True, "message": "Tarefa devolvida com sucesso ao estado inicial."}
+
+@router.post("/{ticket_id}/grab-team-task", response_model=TicketResponse)
+def grab_team_task(
+    ticket_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Tarefa não encontrada.")
+        
+    if ticket.assigned_to_id is not None:
+        raise HTTPException(status_code=400, detail="Esta tarefa já foi agarrada por outro elemento.")
+
+    if ticket.blocked_by_id:
+        prereq = db.query(Ticket).filter(Ticket.id == ticket.blocked_by_id).first()
+        if prereq and prereq.status.lower() not in ['done', 'concluído', 'concluido']:
+            raise HTTPException(status_code=400, detail="A tarefa antecedente ainda não está concluída.")
+
+    ticket.assigned_to_id = current_user.id
+    ticket.status = "In Progress"
+    
+    db.commit()
+    db.refresh(ticket)
+    log_action(db, current_user.id, "Agarrar Tarefa de Equipa", f"Puxou para si a tarefa #{ticket.id} - {ticket.title}", ticket_id=ticket.id)
     return ticket

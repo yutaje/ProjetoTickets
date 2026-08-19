@@ -21,7 +21,8 @@ from datetime import datetime, date
 from apscheduler.schedulers.background import BackgroundScheduler
 from models.daily_report import DailyReport
 from models.notification import Notification
-from routers import chat
+from routers import chat, ticket
+from models.typology import Typology
 
 
 
@@ -142,7 +143,7 @@ app.include_router(report.router)
 app.include_router(audit.router)
 app.include_router(client.router)  
 app.include_router(chat.router)
-
+app.include_router(ticket.router)
 
 
 
