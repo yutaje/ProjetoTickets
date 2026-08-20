@@ -63,7 +63,9 @@ def filter_tickets_by_permissions(query, current_user: User, db: Session):
     role = getattr(current_user, "role", "Member").lower()
     if role in ["admin", "manager", "gestor de operações"]:
         return query
-    return query.filter(Ticket.assigned_to_id == current_user.id)
+    return query.filter(
+        (Ticket.assigned_to_id == current_user.id) | (Ticket.creator_id == current_user.id)
+    )
 
 @router.get("/me/stats")
 def get_my_stats(
@@ -226,7 +228,6 @@ def create_ticket(
         estimated_hours=ticket.estimated_hours,
         due_date=d_date,
         start_date=s_date,
-        task_type=ticket.task_type if hasattr(ticket, 'task_type') else "Geral",
         blocked_by_id=blocked_id,
         creator_id=current_user.id 
     )
@@ -387,6 +388,9 @@ def update_ticket(
     if "description" in update_data and (not update_data["description"] or update_data["description"].strip() == ""):
         raise HTTPException(status_code=400, detail="A descrição da tarefa não pode estar vazia.")
 
+    old_status = ticket.status
+    old_assigned_id = ticket.assigned_to_id
+    
     target_status = update_data.get("status")
     target_blocked = update_data.get("blocked_by_id", ticket.blocked_by_id)
     
@@ -398,14 +402,27 @@ def update_ticket(
                 detail=f"⚠️ Esta tarefa depende da conclusão da tarefa #{prereq.id} ('{prereq.title}') e ainda não pode ser iniciada."
             )
 
-    old_status = ticket.status
     for key, value in update_data.items():
         setattr(ticket, key, value)
         
     db.commit()
     db.refresh(ticket)
     
-    log_action(db, current_user.id, "Atualização de Tarefa", f"Alterou a tarefa #{ticket.id}. Estado anterior: {old_status} -> Novo estado: {ticket.status}", ticket_id=ticket.id, project_id=ticket.project_id)
+    changes = []
+    if "status" in update_data and old_status != ticket.status:
+        changes.append(f"Estado alterado de '{old_status or 'N/D'}' para '{ticket.status}'")
+        
+    if "assigned_to_id" in update_data and old_assigned_id != ticket.assigned_to_id:
+        new_assignee = db.query(User).filter(User.id == ticket.assigned_to_id).first() if ticket.assigned_to_id else None
+        assignee_name = new_assignee.name if new_assignee and new_assignee.name else (new_assignee.email if new_assignee else "Ninguém")
+        changes.append(f"Atribuída a: {assignee_name}")
+        
+    if not changes:
+        changes.append("Atualizou os detalhes gerais da tarefa")
+        
+    detail_message = " | ".join(changes)
+    log_action(db, current_user.id, "Atualização de Tarefa", detail_message, ticket_id=ticket.id, project_id=ticket.project_id)
+
     return ticket
 
 @router.delete("/{ticket_id}", status_code=204)
@@ -570,6 +587,13 @@ def complete_ticket(
     if not db_ticket:
         raise HTTPException(status_code=404, detail="Tarefa não encontrada.")
     
+    uncompleted_subtasks = [sub for sub in db_ticket.sub_tasks if not sub.is_completed]
+    if uncompleted_subtasks:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"⚠️ Não podes concluir esta tarefa principal! Ainda existem {len(uncompleted_subtasks)} subtarefa(s) por concluir."
+        )
+
     db_ticket.final_description = final_description or ""
     db_ticket.status = "Done"
     db_ticket.is_running = False
@@ -1083,17 +1107,18 @@ def stop_timer(
     return ticket
 
 # ==========================================
-# GESTÃO DE SUBTAREFAS
+# GESTÃO DE SUBTAREFAS (COM ATRIBUIÇÃO)
 # ==========================================
 
 @router.get("/{ticket_id}/subtasks")
 def get_subtasks(ticket_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     subtasks = db.query(SubTask).filter(SubTask.ticket_id == ticket_id).all()
-    return [{"id": s.id, "title": s.title, "is_completed": s.is_completed} for s in subtasks]
+    return [{"id": s.id, "title": s.title, "is_completed": s.is_completed, "assigned_to_id": getattr(s, "assigned_to_id", None)} for s in subtasks]
 
 @router.post("/{ticket_id}/subtasks")
 def create_subtask(ticket_id: int, data: dict, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     title = data.get("title")
+    assigned_to_id = data.get("assigned_to_id")
     if not title or title.strip() == "":
         raise HTTPException(status_code=400, detail="O título da subtarefa é obrigatório.")
     
@@ -1101,11 +1126,11 @@ def create_subtask(ticket_id: int, data: dict, db: Session = Depends(get_db), cu
     if not ticket:
         raise HTTPException(status_code=404, detail="Tarefa principal não encontrada.")
         
-    sub = SubTask(ticket_id=ticket_id, title=title, is_completed=False)
+    sub = SubTask(ticket_id=ticket_id, title=title, is_completed=False, assigned_to_id=assigned_to_id)
     db.add(sub)
     db.commit()
     db.refresh(sub)
-    return {"id": sub.id, "title": sub.title, "is_completed": sub.is_completed}
+    return {"id": sub.id, "title": sub.title, "is_completed": sub.is_completed, "assigned_to_id": sub.assigned_to_id}
 
 @router.put("/subtasks/{subtask_id}")
 def update_subtask(subtask_id: int, data: dict, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
@@ -1117,10 +1142,12 @@ def update_subtask(subtask_id: int, data: dict, db: Session = Depends(get_db), c
         sub.is_completed = bool(data["is_completed"])
     if "title" in data:
         sub.title = data["title"]
+    if "assigned_to_id" in data:
+        sub.assigned_to_id = data["assigned_to_id"]
         
     db.commit()
     db.refresh(sub)
-    return {"id": sub.id, "title": sub.title, "is_completed": sub.is_completed}
+    return {"id": sub.id, "title": sub.title, "is_completed": sub.is_completed, "assigned_to_id": sub.assigned_to_id}
 
 @router.delete("/subtasks/{subtask_id}", status_code=204)
 def delete_subtask(subtask_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
@@ -1282,3 +1309,38 @@ def grab_team_task(
     db.refresh(ticket)
     log_action(db, current_user.id, "Agarrar Tarefa de Equipa", f"Puxou para si a tarefa #{ticket.id} - {ticket.title}", ticket_id=ticket.id)
     return ticket
+
+
+# ==========================================
+# ENDPOINT DE AUDIT LOGS DA TAREFA ESPECÍFICA
+# ==========================================
+
+@router.get("/{ticket_id}/audit-logs")
+def get_ticket_audit_logs(
+    ticket_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Tarefa não encontrada.")
+        
+    logs = db.query(AuditLog).filter(AuditLog.ticket_id == ticket_id).order_by(AuditLog.created_at.desc()).all()
+    
+    lista_logs = []
+    for log in logs:
+        user_obj = db.query(User).filter(User.id == log.user_id).first()
+        username = user_obj.name if user_obj and user_obj.name else (user_obj.email if user_obj else f"User #{log.user_id}")
+
+        lista_logs.append({
+            "id": log.id,
+            "user_id": log.user_id,
+            "username": username,
+            "project_id": getattr(log, "project_id", None),
+            "ticket_id": getattr(log, "ticket_id", None),
+            "action": log.action,
+            "details": log.details,
+            "created_at": log.created_at.isoformat() if log.created_at else None
+        })
+        
+    return lista_logs

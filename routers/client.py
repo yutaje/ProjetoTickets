@@ -15,20 +15,15 @@ router = APIRouter(
 def get_clients(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     return db.query(Client).all()
 
-@router.post("/", response_model=ClientResponse)
-def create_client(
-    client: ClientCreate,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    role = getattr(current_user, "role", "Member")
-    if role not in ["Admin", "Manager"]:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Apenas Admins e Managers podem criar clientes."
-        )
+@router.post("/", status_code=status.HTTP_201_CREATED)
+def create_client(client_data: ClientCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    if not client_data.name or not client_data.name.strip():
+        raise HTTPException(status_code=400, detail="O nome do cliente é obrigatório.")
     
-    db_client = Client(**client.dict())
+    if not client_data.company or not client_data.company.strip():
+        raise HTTPException(status_code=400, detail="A empresa do cliente é obrigatória.")
+    
+    db_client = Client(**client_data.dict())
     db.add(db_client)
     db.commit()
     db.refresh(db_client)

@@ -9,8 +9,14 @@ class SubTask(Base):
     ticket_id = Column(Integer, ForeignKey("tickets.id"), nullable=False)
     title = Column(String(255), nullable=False)
     is_completed = Column(Boolean, default=False)
+    
+    # Atribuição da subtarefa a um utilizador específico
+    assigned_to_id = Column(Integer, ForeignKey("users.id"), nullable=True)
 
     ticket = relationship("Ticket", back_populates="sub_tasks")
+    assignee = relationship("User", foreign_keys=[assigned_to_id])
+
+    is_approved = Column(Boolean, default=True)
 
 
 class Ticket(Base):
