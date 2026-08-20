@@ -44,14 +44,13 @@ def format_to_hhmm(hours_float: float) -> str:
     m = int(total_minutes % 60)
     return f"{h:02d}:{m:02d}"
 
-def log_action(db: Session, user_id: int, action: str, details: str, ticket_id: int = None, project_id: int = None):
+def log_action(db: Session, user_id: int, action: str, details: str, ticket_id: int = None):
     try:
         audit = AuditLog(
             user_id=user_id,
             action=action,
             details=details,
             ticket_id=ticket_id,
-            project_id=project_id,
             created_at=datetime.now()
         )
         db.add(audit)
@@ -235,7 +234,7 @@ def create_ticket(
     db.commit()
     db.refresh(db_ticket)
     
-    log_action(db, current_user.id, "Criação de Tarefa", f"Criou a tarefa #{db_ticket.id} - {db_ticket.title}", ticket_id=db_ticket.id, project_id=proj_id)
+    log_action(db, current_user.id, "Criação de Tarefa", f"Criou a tarefa #{db_ticket.id} - {db_ticket.title}", ticket_id=db_ticket.id)
     
     if db_ticket.assigned_to_id and db_ticket.assigned_to_id != current_user.id:
         notif = Notification(
@@ -388,8 +387,11 @@ def update_ticket(
     if "description" in update_data and (not update_data["description"] or update_data["description"].strip() == ""):
         raise HTTPException(status_code=400, detail="A descrição da tarefa não pode estar vazia.")
 
+    # Guardar valores antigos para detetar as alterações exatas
     old_status = ticket.status
+    old_priority = ticket.priority
     old_assigned_id = ticket.assigned_to_id
+    old_description = ticket.description
     
     target_status = update_data.get("status")
     target_blocked = update_data.get("blocked_by_id", ticket.blocked_by_id)
@@ -408,20 +410,29 @@ def update_ticket(
     db.commit()
     db.refresh(ticket)
     
+    # Gerar mensagens claras e específicas para o histórico
     changes = []
     if "status" in update_data and old_status != ticket.status:
-        changes.append(f"Estado alterado de '{old_status or 'N/D'}' para '{ticket.status}'")
+        changes.append(f"Mudou o estado de '{old_status or 'N/D'}' para '{ticket.status}'")
         
+    if "priority" in update_data and old_priority != ticket.priority:
+        changes.append(f"Alterou a prioridade de '{old_priority}' para '{ticket.priority}'")
+
+    if "description" in update_data and old_description != ticket.description:
+        changes.append("Atualizou a descrição da tarefa")
+
     if "assigned_to_id" in update_data and old_assigned_id != ticket.assigned_to_id:
         new_assignee = db.query(User).filter(User.id == ticket.assigned_to_id).first() if ticket.assigned_to_id else None
         assignee_name = new_assignee.name if new_assignee and new_assignee.name else (new_assignee.email if new_assignee else "Ninguém")
-        changes.append(f"Atribuída a: {assignee_name}")
+        changes.append(f"Atribuiu a tarefa a: {assignee_name}")
         
     if not changes:
         changes.append("Atualizou os detalhes gerais da tarefa")
         
     detail_message = " | ".join(changes)
-    log_action(db, current_user.id, "Atualização de Tarefa", detail_message, ticket_id=ticket.id, project_id=ticket.project_id)
+    
+    # Gravação direta sem referenciar project_id
+    log_action(db, current_user.id, "Atualização de Tarefa", detail_message, ticket_id=ticket.id)
 
     return ticket
 
