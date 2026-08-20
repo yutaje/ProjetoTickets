@@ -1,6 +1,16 @@
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 from datetime import date
+
+class SubTaskResponse(BaseModel):
+    id: int
+    ticket_id: int
+    title: str
+    is_completed: bool
+    assigned_to_id: Optional[int] = None
+
+    class Config:
+        from_attributes = True
 
 class TicketCreate(BaseModel):
     title: str
@@ -61,6 +71,9 @@ class TicketResponse(BaseModel):
     
     # --- NOVA LINHA: Para o React bloquear botões se o user não for o criador ---
     creator_id: Optional[int] = None
+
+    # --- LISTA DE SUBTAREFAS (essencial para o retorno do JSON completo) ---
+    sub_tasks: List[SubTaskResponse] = []
 
     class Config:
         from_attributes = True

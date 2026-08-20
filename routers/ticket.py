@@ -62,9 +62,11 @@ def filter_tickets_by_permissions(query, current_user: User, db: Session):
     role = getattr(current_user, "role", "Member").lower()
     if role in ["admin", "manager", "gestor de operações"]:
         return query
-    return query.filter(
-        (Ticket.assigned_to_id == current_user.id) | (Ticket.creator_id == current_user.id)
-    )
+    return query.outerjoin(SubTask, Ticket.id == SubTask.ticket_id).filter(
+        (Ticket.assigned_to_id == current_user.id) | 
+        (Ticket.creator_id == current_user.id) |
+        (SubTask.assigned_to_id == current_user.id)
+    ).distinct()
 
 @router.get("/me/stats")
 def get_my_stats(
@@ -256,8 +258,13 @@ def get_tickets(
     check_and_create_deadline_notifications(current_user, db)
     query = db.query(Ticket)
     role = getattr(current_user, "role", "Member").lower()
+    
     if role in ["user", "member", "técnico"]:
-        query = query.filter(Ticket.assigned_to_id == current_user.id)
+        query = query.outerjoin(SubTask, Ticket.id == SubTask.ticket_id).filter(
+            (Ticket.assigned_to_id == current_user.id) |
+            (Ticket.creator_id == current_user.id) |
+            (SubTask.assigned_to_id == current_user.id)
+        ).distinct()
     
     if search:
         query = query.filter(Ticket.title.ilike(f"%{search}%"))
@@ -387,7 +394,6 @@ def update_ticket(
     if "description" in update_data and (not update_data["description"] or update_data["description"].strip() == ""):
         raise HTTPException(status_code=400, detail="A descrição da tarefa não pode estar vazia.")
 
-    # Guardar valores antigos para detetar as alterações exatas
     old_status = ticket.status
     old_priority = ticket.priority
     old_assigned_id = ticket.assigned_to_id
@@ -410,7 +416,6 @@ def update_ticket(
     db.commit()
     db.refresh(ticket)
     
-    # Gerar mensagens claras e específicas para o histórico
     changes = []
     if "status" in update_data and old_status != ticket.status:
         changes.append(f"Mudou o estado de '{old_status or 'N/D'}' para '{ticket.status}'")
@@ -426,12 +431,17 @@ def update_ticket(
         assignee_name = new_assignee.name if new_assignee and new_assignee.name else (new_assignee.email if new_assignee else "Ninguém")
         changes.append(f"Atribuiu a tarefa a: {assignee_name}")
         
+        if ticket.assigned_to_id and ticket.assigned_to_id != current_user.id:
+            db.add(Notification(
+                user_id=ticket.assigned_to_id,
+                message=f"A tarefa #{ticket.id} ('{ticket.title}') foi-te atribuída."
+            ))
+            db.commit()
+        
     if not changes:
         changes.append("Atualizou os detalhes gerais da tarefa")
         
     detail_message = " | ".join(changes)
-    
-    # Gravação direta sem referenciar project_id
     log_action(db, current_user.id, "Atualização de Tarefa", detail_message, ticket_id=ticket.id)
 
     return ticket
@@ -1139,6 +1149,14 @@ def create_subtask(ticket_id: int, data: dict, db: Session = Depends(get_db), cu
         
     sub = SubTask(ticket_id=ticket_id, title=title, is_completed=False, assigned_to_id=assigned_to_id)
     db.add(sub)
+    
+    if assigned_to_id and assigned_to_id != current_user.id:
+        notif = Notification(
+            user_id=assigned_to_id,
+            message=f"Foi-te atribuída a subtarefa '{title}' na tarefa #{ticket.id} - {ticket.title}"
+        )
+        db.add(notif)
+
     db.commit()
     db.refresh(sub)
     return {"id": sub.id, "title": sub.title, "is_completed": sub.is_completed, "assigned_to_id": sub.assigned_to_id}
@@ -1149,12 +1167,21 @@ def update_subtask(subtask_id: int, data: dict, db: Session = Depends(get_db), c
     if not sub:
         raise HTTPException(status_code=404, detail="Subtarefa não encontrada.")
         
+    old_assigned_id = getattr(sub, "assigned_to_id", None)
+
     if "is_completed" in data:
         sub.is_completed = bool(data["is_completed"])
     if "title" in data:
         sub.title = data["title"]
     if "assigned_to_id" in data:
         sub.assigned_to_id = data["assigned_to_id"]
+        if sub.assigned_to_id and sub.assigned_to_id != old_assigned_id and sub.assigned_to_id != current_user.id:
+            ticket = db.query(Ticket).filter(Ticket.id == sub.ticket_id).first()
+            task_title = ticket.title if ticket else f"#{sub.ticket_id}"
+            db.add(Notification(
+                user_id=sub.assigned_to_id,
+                message=f"Foi-te atribuída a subtarefa '{sub.title}' na tarefa {task_title}"
+            ))
         
     db.commit()
     db.refresh(sub)
