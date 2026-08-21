@@ -6,17 +6,20 @@ class SubTask(Base):
     __tablename__ = "sub_tasks"
 
     id = Column(Integer, primary_key=True, index=True)
-    ticket_id = Column(Integer, ForeignKey("tickets.id"), nullable=False)
+    ticket_id = Column(Integer, ForeignKey("tickets.id", ondelete="CASCADE"), nullable=False)
     title = Column(String(255), nullable=False)
     is_completed = Column(Boolean, default=False)
     
     # Atribuição da subtarefa a um utilizador específico
     assigned_to_id = Column(Integer, ForeignKey("users.id"), nullable=True)
 
+    # 🆕 Fluxo de Aprovação de Subtarefas
+    status = Column(String(50), default="Pendente") # "Pendente", "Aguardar Aprovação", "Aprovada"
+    is_approved = Column(Boolean, default=False)
+    rejection_reason = Column(String(500), nullable=True)
+
     ticket = relationship("Ticket", back_populates="sub_tasks")
     assignee = relationship("User", foreign_keys=[assigned_to_id])
-
-    is_approved = Column(Boolean, default=True)
 
 
 class Ticket(Base):
@@ -31,7 +34,7 @@ class Ticket(Base):
     # Tipologia (ex: Programação, Redes)
     typology_id = Column(Integer, ForeignKey("typologies.id"), nullable=True)
     
-    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=True)
     assigned_to_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     team_id = Column(Integer, ForeignKey("teams.id"), nullable=True) # Atribuição por equipa
 

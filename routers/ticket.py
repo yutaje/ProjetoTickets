@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Form, UploadFile, File
 import os
 from sqlalchemy.orm import Session
+from sqlalchemy import or_
 from database import get_db
 from models.ticket import Ticket, SubTask
 from models.user import User
@@ -60,12 +61,43 @@ def log_action(db: Session, user_id: int, action: str, details: str, ticket_id: 
 
 def filter_tickets_by_permissions(query, current_user: User, db: Session):
     role = getattr(current_user, "role", "Member").lower()
-    if role in ["admin", "manager", "gestor de operações"]:
+    
+    # 1. Admin, Gestor de Operações e Gestor de Projetos têm visão total de todas as tarefas
+    if role in ["admin", "manager", "gestor de operações", "gestor de projeto", "gestor de projetos"]:
         return query
+
+    # 2. Descobrir as Equipas onde o utilizador é Líder / Gestor de Equipa
+    led_teams = db.query(Team).filter(
+        (getattr(Team, "leader_id", None) == current_user.id) |
+        (getattr(Team, "manager_id", None) == current_user.id)
+    ).all()
+    led_team_ids = [t.id for t in led_teams]
+
+    # Obter os IDs dos membros dessas equipas lideradas
+    team_member_ids = []
+    for t in led_teams:
+        if hasattr(t, "members"):
+            team_member_ids.extend([m.id for m in t.members])
+        if hasattr(t, "users"):
+            team_member_ids.extend([u.id for u in t.users])
+    team_member_ids = list(set(team_member_ids))
+
+    # 3. Condições base para Técnicos / Colaboradores
+    conditions = [
+        Ticket.assigned_to_id == current_user.id,
+        Ticket.creator_id == current_user.id,
+        SubTask.assigned_to_id == current_user.id
+    ]
+
+    # 4. Se for Líder de Equipa: apenas vê tarefas da sua equipa ou atribuídas aos membros dela
+    if "líder de equipa" in role or "lider de equipa" in role or led_team_ids:
+        if led_team_ids:
+            conditions.append(Ticket.team_id.in_(led_team_ids))
+        if team_member_ids:
+            conditions.append(Ticket.assigned_to_id.in_(team_member_ids))
+
     return query.outerjoin(SubTask, Ticket.id == SubTask.ticket_id).filter(
-        (Ticket.assigned_to_id == current_user.id) | 
-        (Ticket.creator_id == current_user.id) |
-        (SubTask.assigned_to_id == current_user.id)
+        or_(*conditions)
     ).distinct()
 
 @router.get("/me/stats")
@@ -127,7 +159,7 @@ def get_chart_hours(
     today = date.today()
     
     log_query = db.query(TimeLog)
-    if role not in ["admin", "manager", "gestor de operações"]:
+    if role not in ["admin", "manager", "gestor de operações", "gestor de projeto", "gestor de projetos"]:
         log_query = log_query.filter(TimeLog.user_id == current_user.id)
         
     if str(period).lower() in ["7", "30", "1", "week", "last_week"]:
@@ -188,8 +220,9 @@ def get_project_tickets(
     if not project:
         raise HTTPException(status_code=404, detail="Projeto não encontrado.")
     
-    tickets = db.query(Ticket).filter(Ticket.project_id == project_id).all()
-    return tickets
+    query = db.query(Ticket).filter(Ticket.project_id == project_id)
+    query = filter_tickets_by_permissions(query, current_user, db)
+    return query.all()
 
 @router.post("/", response_model=TicketResponse, status_code=status.HTTP_201_CREATED)
 def create_ticket(
@@ -257,14 +290,7 @@ def get_tickets(
 ):
     check_and_create_deadline_notifications(current_user, db)
     query = db.query(Ticket)
-    role = getattr(current_user, "role", "Member").lower()
-    
-    if role in ["user", "member", "técnico"]:
-        query = query.outerjoin(SubTask, Ticket.id == SubTask.ticket_id).filter(
-            (Ticket.assigned_to_id == current_user.id) |
-            (Ticket.creator_id == current_user.id) |
-            (SubTask.assigned_to_id == current_user.id)
-        ).distinct()
+    query = filter_tickets_by_permissions(query, current_user, db)
     
     if search:
         query = query.filter(Ticket.title.ilike(f"%{search}%"))
@@ -384,10 +410,20 @@ def update_ticket(
         raise HTTPException(status_code=404, detail="Ticket não encontrado")
 
     role = getattr(current_user, "role", "Member").lower()
-    if role not in ["admin", "manager", "gestor de operações"]:
-        creator_id = getattr(ticket, "creator_id", None)
-        assigned_id = getattr(ticket, "assigned_to_id", None)
-        if creator_id != current_user.id and assigned_id != current_user.id:
+    
+    # Validação Granular de Permissão de Edição
+    if role not in ["admin", "manager", "gestor de operações", "gestor de projeto", "gestor de projetos"]:
+        is_creator = ticket.creator_id == current_user.id
+        is_assignee = ticket.assigned_to_id == current_user.id
+        
+        # Verificar se é líder da equipa do ticket
+        is_team_leader = False
+        if ticket.team_id:
+            team = db.query(Team).filter(Team.id == ticket.team_id).first()
+            if team and (getattr(team, "leader_id", None) == current_user.id or getattr(team, "manager_id", None) == current_user.id):
+                is_team_leader = True
+
+        if not (is_creator or is_assignee or is_team_leader):
             raise HTTPException(status_code=403, detail="Acesso negado: Não podes editar esta tarefa.")
 
     update_data = ticket_data.dict(exclude_unset=True)
@@ -608,11 +644,14 @@ def complete_ticket(
     if not db_ticket:
         raise HTTPException(status_code=404, detail="Tarefa não encontrada.")
     
-    uncompleted_subtasks = [sub for sub in db_ticket.sub_tasks if not sub.is_completed]
+    uncompleted_subtasks = [
+        sub for sub in db_ticket.sub_tasks 
+        if not sub.is_completed or getattr(sub, "status", "Pendente") != "Aprovada"
+    ]
     if uncompleted_subtasks:
         raise HTTPException(
             status_code=400, 
-            detail=f"⚠️ Não podes concluir esta tarefa principal! Ainda existem {len(uncompleted_subtasks)} subtarefa(s) por concluir."
+            detail=f"⚠️ Não podes concluir esta tarefa principal! Ainda existem {len(uncompleted_subtasks)} subtarefa(s) pendentes de conclusão ou aprovação."
         )
 
     db_ticket.final_description = final_description or ""
@@ -820,7 +859,7 @@ def update_report_status_admin(
 ):
     role = getattr(current_user, "role", "Member")
     
-    if role not in ["Admin", "Manager"]:
+    if role not in ["Admin", "Manager", "gestor de operações"]:
         raise HTTPException(status_code=403, detail="Acesso restrito. Apenas Admins e Managers podem aprovar relatórios.")
         
     report = db.query(DailyReport).filter(DailyReport.id == report_id).first()
@@ -1078,6 +1117,13 @@ def grab_ticket(
                 detail=f"Não podes agarrar esta tarefa! A dependência #{prereq.id} ('{prereq.title}') ainda não está concluída."
             )
 
+    user_has_subtask = any(sub.assigned_to_id == current_user.id for sub in ticket.sub_tasks)
+    if user_has_subtask:
+        raise HTTPException(
+            status_code=400,
+            detail="Não podes assumir a tarefa principal porque já estás associado a uma subtarefa dela."
+        )
+
     if ticket.assigned_to_id is not None and ticket.assigned_to_id != current_user.id:
         raise HTTPException(
             status_code=400, 
@@ -1128,13 +1174,25 @@ def stop_timer(
     return ticket
 
 # ==========================================
-# GESTÃO DE SUBTAREFAS (COM ATRIBUIÇÃO)
+# GESTÃO DE SUBTAREFAS (COM FLUXO DE APROVAÇÃO)
 # ==========================================
 
 @router.get("/{ticket_id}/subtasks")
 def get_subtasks(ticket_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     subtasks = db.query(SubTask).filter(SubTask.ticket_id == ticket_id).all()
-    return [{"id": s.id, "title": s.title, "is_completed": s.is_completed, "assigned_to_id": getattr(s, "assigned_to_id", None)} for s in subtasks]
+    return [
+        {
+            "id": s.id, 
+            "ticket_id": s.ticket_id,
+            "title": s.title, 
+            "is_completed": s.is_completed, 
+            "assigned_to_id": getattr(s, "assigned_to_id", None),
+            "status": getattr(s, "status", "Pendente") or "Pendente",
+            "is_approved": getattr(s, "is_approved", False),
+            "rejection_reason": getattr(s, "rejection_reason", None)
+        } 
+        for s in subtasks
+    ]
 
 @router.post("/{ticket_id}/subtasks")
 def create_subtask(ticket_id: int, data: dict, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
@@ -1147,7 +1205,14 @@ def create_subtask(ticket_id: int, data: dict, db: Session = Depends(get_db), cu
     if not ticket:
         raise HTTPException(status_code=404, detail="Tarefa principal não encontrada.")
         
-    sub = SubTask(ticket_id=ticket_id, title=title, is_completed=False, assigned_to_id=assigned_to_id)
+    sub = SubTask(
+        ticket_id=ticket_id, 
+        title=title, 
+        is_completed=False, 
+        assigned_to_id=assigned_to_id,
+        status="Pendente",
+        is_approved=False
+    )
     db.add(sub)
     
     if assigned_to_id and assigned_to_id != current_user.id:
@@ -1159,7 +1224,95 @@ def create_subtask(ticket_id: int, data: dict, db: Session = Depends(get_db), cu
 
     db.commit()
     db.refresh(sub)
-    return {"id": sub.id, "title": sub.title, "is_completed": sub.is_completed, "assigned_to_id": sub.assigned_to_id}
+    return {
+        "id": sub.id, 
+        "ticket_id": sub.ticket_id,
+        "title": sub.title, 
+        "is_completed": sub.is_completed, 
+        "assigned_to_id": sub.assigned_to_id,
+        "status": sub.status,
+        "is_approved": sub.is_approved,
+        "rejection_reason": sub.rejection_reason
+    }
+
+@router.put("/subtasks/{subtask_id}/submit")
+def submit_subtask_for_approval(subtask_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    sub = db.query(SubTask).filter(SubTask.id == subtask_id).first()
+    if not sub:
+        raise HTTPException(status_code=404, detail="Subtarefa não encontrada.")
+        
+    ticket = db.query(Ticket).filter(Ticket.id == sub.ticket_id).first()
+    
+    sub.status = "Aguardar Aprovação"
+    sub.rejection_reason = None
+    
+    if ticket and ticket.creator_id and ticket.creator_id != current_user.id:
+        db.add(Notification(
+            user_id=ticket.creator_id,
+            message=f"A subtarefa '{sub.title}' da tarefa #{ticket.id} foi submetida e aguarda aprovação."
+        ))
+        
+    db.commit()
+    db.refresh(sub)
+    return {"message": "Subtarefa enviada para aprovação com sucesso!", "subtask_id": sub.id, "status": sub.status}
+
+@router.put("/subtasks/{subtask_id}/approve")
+def approve_subtask(subtask_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    sub = db.query(SubTask).filter(SubTask.id == subtask_id).first()
+    if not sub:
+        raise HTTPException(status_code=404, detail="Subtarefa não encontrada.")
+        
+    ticket = db.query(Ticket).filter(Ticket.id == sub.ticket_id).first()
+    role = getattr(current_user, "role", "Member").lower()
+    
+    if role not in ["admin", "manager", "gestor de operações", "gestor de projeto", "gestor de projetos"] and ticket.creator_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Apenas o criador da tarefa ou gestores podem aprovar subtarefas.")
+        
+    sub.status = "Aprovada"
+    sub.is_completed = True
+    sub.is_approved = True
+    sub.rejection_reason = None
+    
+    if sub.assigned_to_id and sub.assigned_to_id != current_user.id:
+        db.add(Notification(
+            user_id=sub.assigned_to_id,
+            message=f"A tua subtarefa '{sub.title}' na tarefa #{ticket.id} foi APROVADA."
+        ))
+        
+    db.commit()
+    db.refresh(sub)
+    return {"message": "Subtarefa aprovada com sucesso!", "subtask_id": sub.id, "status": sub.status}
+
+@router.put("/subtasks/{subtask_id}/reject")
+def reject_subtask(subtask_id: int, data: dict, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    sub = db.query(SubTask).filter(SubTask.id == subtask_id).first()
+    if not sub:
+        raise HTTPException(status_code=404, detail="Subtarefa não encontrada.")
+        
+    reason = data.get("reason")
+    if not reason or reason.strip() == "":
+        raise HTTPException(status_code=400, detail="É obrigatório indicar o motivo da recusa.")
+        
+    ticket = db.query(Ticket).filter(Ticket.id == sub.ticket_id).first()
+    role = getattr(current_user, "role", "Member").lower()
+    
+    if role not in ["admin", "manager", "gestor de operações", "gestor de projeto", "gestor de projetos"] and ticket.creator_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Apenas o criador da tarefa ou gestores podem recusar subtarefas.")
+        
+    sub.status = "Pendente"
+    sub.is_completed = False
+    sub.is_approved = False
+    sub.rejection_reason = reason
+    
+    if sub.assigned_to_id:
+        db.add(Notification(
+            user_id=sub.assigned_to_id,
+            message=f"A subtarefa '{sub.title}' na tarefa #{ticket.id} foi RECUSADA. Motivo: {reason}"
+        ))
+        
+    db.commit()
+    db.refresh(sub)
+    return {"message": "Subtarefa devolvida para correção!", "subtask_id": sub.id, "status": sub.status}
 
 @router.put("/subtasks/{subtask_id}")
 def update_subtask(subtask_id: int, data: dict, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
@@ -1171,6 +1324,13 @@ def update_subtask(subtask_id: int, data: dict, db: Session = Depends(get_db), c
 
     if "is_completed" in data:
         sub.is_completed = bool(data["is_completed"])
+        if sub.is_completed:
+            sub.status = "Aprovada"
+            sub.is_approved = True
+        else:
+            sub.status = "Pendente"
+            sub.is_approved = False
+            
     if "title" in data:
         sub.title = data["title"]
     if "assigned_to_id" in data:
@@ -1185,7 +1345,16 @@ def update_subtask(subtask_id: int, data: dict, db: Session = Depends(get_db), c
         
     db.commit()
     db.refresh(sub)
-    return {"id": sub.id, "title": sub.title, "is_completed": sub.is_completed, "assigned_to_id": sub.assigned_to_id}
+    return {
+        "id": sub.id, 
+        "ticket_id": sub.ticket_id,
+        "title": sub.title, 
+        "is_completed": sub.is_completed, 
+        "assigned_to_id": sub.assigned_to_id,
+        "status": sub.status,
+        "is_approved": sub.is_approved,
+        "rejection_reason": sub.rejection_reason
+    }
 
 @router.delete("/subtasks/{subtask_id}", status_code=204)
 def delete_subtask(subtask_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
@@ -1224,7 +1393,7 @@ def create_global_task_type(
     current_user: User = Depends(get_current_user)
 ):
     role = getattr(current_user, "role", "Member")
-    if role not in ["Admin", "Manager"]:
+    if role not in ["Admin", "Manager", "gestor de operações"]:
         raise HTTPException(status_code=403, detail="Apenas Managers ou Admins podem criar tipos de tarefa.")
     
     normalized_name = task_type.name.strip().capitalize()
@@ -1246,7 +1415,7 @@ def delete_global_task_type(
     current_user: User = Depends(get_current_user)
 ):
     role = getattr(current_user, "role", "Member")
-    if role not in ["Admin", "Manager"]:
+    if role not in ["Admin", "Manager", "gestor de operações"]:
         raise HTTPException(status_code=403, detail="Apenas Managers ou Admins podem apagar tipos de tarefa.")
         
     db_type = db.query(TaskType).filter(TaskType.id == type_id).first()
@@ -1263,7 +1432,7 @@ def get_admin_users_reports_status(
     current_user: User = Depends(get_current_user)
 ):
     role = getattr(current_user, "role", "Member")
-    if role not in ["Admin", "Manager"]:
+    if role not in ["Admin", "Manager", "gestor de operações"]:
         raise HTTPException(status_code=403, detail="Acesso negado.")
 
     users = db.query(User).all()

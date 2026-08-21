@@ -8,6 +8,11 @@ class SubTaskResponse(BaseModel):
     title: str
     is_completed: bool
     assigned_to_id: Optional[int] = None
+    
+    # 🆕 Campos para o fluxo de aprovação da subtarefa
+    status: Optional[str] = "Pendente"
+    is_approved: Optional[bool] = False
+    rejection_reason: Optional[str] = None
 
     class Config:
         from_attributes = True

@@ -16,12 +16,13 @@ from models.worklog import WorkLog
 from models.daily_report import DailyReport
 from models.time_log import TimeLog
 from models.audit_log import AuditLog
-from schemas.user import UserResponse 
-from routers import audit, notification, report, user, project, ticket, auth, team, client, chat
-from datetime import datetime, date
-from apscheduler.schedulers.background import BackgroundScheduler
 from models.notification import Notification
 from models.typology import Typology
+import models.feedback  # 🆕 Importa os modelos de Feedback para criação automática das tabelas
+from schemas.user import UserResponse 
+from routers import audit, notification, report, user, project, ticket, auth, team, client, chat, feedback  # 🆕 Importa o router de feedback
+from datetime import datetime, date, timedelta
+from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi.responses import StreamingResponse
 import io
 
@@ -59,12 +60,49 @@ def check_and_send_reminders():
                     db.add(Notification(user_id=u.id, message=msg))
         db.commit()
     except Exception as e:
-        print("Erro ao processar lembretes:", e)
+        print("Erro ao processar lembretes de relatórios:", e)
+    finally:
+        db.close()
+
+# 🆕 Rotina de verificação automática para lembretes de Feedback (30 min antes)
+def check_feedback_deadlines_job():
+    db = SessionLocal()
+    try:
+        now = datetime.utcnow()
+        reminder_start = now + timedelta(minutes=25)
+        reminder_end = now + timedelta(minutes=35)
+
+        impending_requests = db.query(models.feedback.FeedbackRequest).filter(
+            models.feedback.FeedbackRequest.deadline >= reminder_start,
+            models.feedback.FeedbackRequest.deadline <= reminder_end
+        ).all()
+
+        for req in impending_requests:
+            all_users = db.query(User).all()
+            for u in all_users:
+                has_resp = db.query(models.feedback.FeedbackResponse).filter(
+                    models.feedback.FeedbackResponse.request_id == req.id,
+                    models.feedback.FeedbackResponse.user_id == u.id
+                ).first()
+
+                if not has_resp:
+                    msg = f"⏳ LEMBRETE: Faltam 30 minutos para terminar o prazo do feedback '{req.title}'!"
+                    exists = db.query(Notification).filter(
+                        Notification.user_id == u.id,
+                        Notification.message == msg
+                    ).first()
+
+                    if not exists:
+                        db.add(Notification(user_id=u.id, message=msg))
+        db.commit()
+    except Exception as e:
+        print("Erro ao processar lembretes de feedback:", e)
     finally:
         db.close()
 
 scheduler = BackgroundScheduler()
 scheduler.add_job(check_and_send_reminders, 'cron', hour=17, minute=30)
+scheduler.add_job(check_feedback_deadlines_job, 'interval', minutes=5)  # 🆕 Corre a cada 5 min à procura de feedbacks a expirar
 scheduler.start()
 
 @app.middleware("http")
@@ -74,8 +112,6 @@ async def audit_log_middleware(request: Request, call_next):
         
         path = request.url.path
         
-        # Ignora o registo genérico nas rotas de tickets para evitar duplicados e mensagens técnicas,
-        # deixando que as funções dedicadas no router de tickets gravem os logs detalhados e humanos.
         if path.startswith("/tickets/"):
             return response
 
@@ -126,6 +162,7 @@ app.include_router(report.router)
 app.include_router(audit.router)
 app.include_router(client.router)  
 app.include_router(chat.router)
+app.include_router(feedback.router)  # 🆕 Registo do router de Feedback
 
 @app.get("/")
 def home():
