@@ -69,7 +69,7 @@ def create_project(
         description=project.description,
         team_id=project.team_id,
         client_id=project.client_id,
-        manager_id=current_user.id
+        
     )
     db.add(db_project)
     db.commit()

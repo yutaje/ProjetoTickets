@@ -26,6 +26,7 @@ from fastapi.responses import StreamingResponse
 import io
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
+from pydantic import BaseModel
 
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
@@ -644,6 +645,7 @@ def complete_ticket(
     if not db_ticket:
         raise HTTPException(status_code=404, detail="Tarefa não encontrada.")
     
+    # 1. Validar subtarefas
     uncompleted_subtasks = [
         sub for sub in db_ticket.sub_tasks 
         if not sub.is_completed or getattr(sub, "status", "Pendente") != "Aprovada"
@@ -654,19 +656,44 @@ def complete_ticket(
             detail=f"⚠️ Não podes concluir esta tarefa principal! Ainda existem {len(uncompleted_subtasks)} subtarefa(s) pendentes de conclusão ou aprovação."
         )
 
+    # 2. Evitar duplicações caso a tarefa já esteja concluída
+    if db_ticket.status == "Done":
+        return db_ticket
+
     db_ticket.final_description = final_description or ""
     db_ticket.status = "Done"
     db_ticket.is_running = False
-    
-    if tracked_hours is not None and tracked_hours > 0:
-        new_log = TimeLog(
-            ticket_id=db_ticket.id,
-            user_id=current_user.id,
-            date=date.today(),
-            hours_spent=float(tracked_hours)
-        )
-        db.add(new_log)
 
+    # 3. Gestão Inteligente de Horas (Desconta o que já foi faturado em dias anteriores)
+    if tracked_hours is not None and tracked_hours > 0:
+        already_logged_hours = db.query(TimeLog).filter(
+            TimeLog.ticket_id == db_ticket.id
+        ).all()
+        total_previously_logged = sum(log.hours_spent for log in already_logged_hours)
+
+        if float(tracked_hours) > total_previously_logged:
+            hours_for_today = round(float(tracked_hours) - total_previously_logged, 4)
+        else:
+            hours_for_today = float(tracked_hours)
+
+        if hours_for_today > 0.001:
+            existing_today_log = db.query(TimeLog).filter(
+                TimeLog.ticket_id == db_ticket.id,
+                TimeLog.user_id == current_user.id,
+                TimeLog.date == date.today(),
+                TimeLog.hours_spent == hours_for_today
+            ).first()
+
+            if not existing_today_log:
+                new_log = TimeLog(
+                    ticket_id=db_ticket.id,
+                    user_id=current_user.id,
+                    date=date.today(),
+                    hours_spent=hours_for_today
+                )
+                db.add(new_log)
+
+    # 4. Upload de anexo
     if file and file.filename:
         file_location = os.path.join(UPLOAD_DIR, file.filename)
         with open(file_location, "wb") as buffer:
@@ -1370,8 +1397,6 @@ def delete_subtask(subtask_id: int, db: Session = Depends(get_db), current_user:
 # TIPOS DE TAREFA E ADMIN RELATÓRIOS
 # ==========================================
 
-from pydantic import BaseModel
-
 class TaskTypeCreateSchema(BaseModel):
     name: str
 
@@ -1473,7 +1498,12 @@ def get_admin_users_reports_status(
     return result
 
 @router.post("/{ticket_id}/return")
-def return_ticket(ticket_id: int, data: dict, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def return_ticket(
+    ticket_id: int, 
+    data: dict, 
+    db: Session = Depends(get_db), 
+    current_user: User = Depends(get_current_user)
+):
     reason = data.get("reason")
     if not reason or reason.strip() == "":
         raise HTTPException(status_code=400, detail="É obrigatório indicar um motivo/descrição para devolver a tarefa.")
@@ -1482,13 +1512,32 @@ def return_ticket(ticket_id: int, data: dict, db: Session = Depends(get_db), cur
     if not ticket:
         raise HTTPException(status_code=404, detail="Tarefa não encontrada.")
         
+    # 1. Reset ao estado e técnico atribuído
     ticket.status = "To Do"
     ticket.assigned_to_id = None
     ticket.is_running = False
     ticket.return_reason = reason
     
+    # 2. Injeta o comentário automático visível na aba de comentários da tarefa
+    devolution_comment = Comment(
+        ticket_id=ticket.id,
+        author_id=current_user.id,
+        text=f"⚠️ Devolução de Tarefa: {reason}"
+    )
+    db.add(devolution_comment)
+
+    # 3. Regista na auditoria do sistema
+    log_action(
+        db, 
+        current_user.id, 
+        "Devolução de Tarefa (Divórcio)", 
+        f"Devolveu a tarefa #{ticket.id}. Motivo: {reason}", 
+        ticket_id=ticket.id
+    )
+
     db.commit()
-    log_action(db, current_user.id, "Devolução de Tarefa (Divórcio)", f"Devolveu a tarefa #{ticket.id}. Motivo: {reason}", ticket_id=ticket.id)
+    db.refresh(ticket)
+    
     return {"success": True, "message": "Tarefa devolvida com sucesso ao estado inicial."}
 
 @router.post("/{ticket_id}/grab-team-task", response_model=TicketResponse)
@@ -1516,7 +1565,6 @@ def grab_team_task(
     db.refresh(ticket)
     log_action(db, current_user.id, "Agarrar Tarefa de Equipa", f"Puxou para si a tarefa #{ticket.id} - {ticket.title}", ticket_id=ticket.id)
     return ticket
-
 
 # ==========================================
 # ENDPOINT DE AUDIT LOGS DA TAREFA ESPECÍFICA

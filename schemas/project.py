@@ -1,12 +1,12 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List
 
 class ProjectCreate(BaseModel):
-    name: str
-    description: Optional[str] = None
+    name: str = Field(..., min_length=1)
+    description: str = Field(..., min_length=1)
     team_id: Optional[int] = None
-    client_id: Optional[int] = None  # <--- Adicionado aqui
-    ticket_ids: Optional[List[int]] = []  
+    client_id: Optional[int] = None
+    ticket_ids: Optional[List[int]] = [] 
 
 class ProjectUpdate(BaseModel):
     name: Optional[str] = None

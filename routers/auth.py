@@ -13,7 +13,7 @@ load_dotenv()
 
 SECRET_KEY = os.getenv("SECRET_KEY", "fallback_secreta")
 ALGORITHM = os.getenv("ALGORITHM", "HS256")
-ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 60))
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 10080))
 
 router = APIRouter(
     tags=["Authentication"]
@@ -54,7 +54,18 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
     if not user:
         raise HTTPException(status_code=400, detail="Credenciais inválidas (Email incorreto)")
     
-    if not pwd_context.verify(form_data.password, user.hashed_password):
+    # 1. Tenta verificar por Bcrypt; se falhar, tenta comparação em texto simples
+    is_valid = False
+    try:
+        is_valid = pwd_context.verify(form_data.password, user.hashed_password)
+    except Exception:
+        # Caso o valor no banco não esteja formatado como hash válida
+        is_valid = (form_data.password == user.hashed_password)
+        
+    if not is_valid and form_data.password == user.hashed_password:
+        is_valid = True
+
+    if not is_valid:
         raise HTTPException(status_code=400, detail="Credenciais inválidas (Password incorreta)")
     
     access_token = create_access_token(data={"sub": user.email, "role": user.role, "user_id": user.id})
