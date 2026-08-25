@@ -48,6 +48,9 @@ class Ticket(Base):
     due_date = Column(DateTime, nullable=True)
     is_running = Column(Boolean, default=False)
     start_date = Column(Date, nullable=True)
+    
+    # 🆕 Data e hora em que a tarefa foi concluída
+    completed_at = Column(DateTime, nullable=True)
 
     # Motivo de devolução da tarefa ("divórcio")
     return_reason = Column(String(500), nullable=True)

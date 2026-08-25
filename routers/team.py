@@ -5,6 +5,7 @@ from models.team import Team
 from models.user import User
 from models.project import Project
 from models.notification import Notification
+from models.chat import ChatRoom, RoomMember
 from schemas.team import TeamCreate, TeamResponse, TeamUpdate
 from core.security import require_manager_or_admin, get_current_user
 from typing import List
@@ -13,6 +14,46 @@ router = APIRouter(
     prefix="/teams",
     tags=["Teams"]
 )
+
+def sync_team_removal_from_project_chats(team_id: int, remaining_member_ids: list, db: Session):
+    """
+    Remove utilizadores de TODAS as salas de chat (Gerais e Subchats) dos projetos 
+    ligados a esta equipa caso deixem de pertencer a qualquer equipa do projeto.
+    """
+    projects = db.query(Project).filter(
+        (Project.teams.any(Team.id == team_id)) |
+        (Project.team_id == team_id)
+    ).all()
+
+    for proj in projects:
+        allowed_user_ids = set()
+        teams = getattr(proj, "teams", []) or []
+        
+        # Se for modelo legado com team_id único
+        if not teams and getattr(proj, "team_id", None):
+            t_obj = db.query(Team).filter(Team.id == proj.team_id).first()
+            if t_obj:
+                teams = [t_obj]
+
+        for t in teams:
+            if t.id == team_id:
+                allowed_user_ids.update(remaining_member_ids)
+            else:
+                if getattr(t, "leader_id", None): allowed_user_ids.add(t.leader_id)
+                if getattr(t, "manager_id", None): allowed_user_ids.add(t.manager_id)
+                if getattr(t, "owner_id", None): allowed_user_ids.add(t.owner_id)
+                if hasattr(t, "members"): allowed_user_ids.update([m.id for m in t.members if hasattr(m, "id")])
+                if hasattr(t, "users"): allowed_user_ids.update([u.id for u in t.users if hasattr(u, "id")])
+
+        # Remove utilizadores sem permissão de todas as salas deste projeto
+        project_rooms = db.query(ChatRoom).filter(ChatRoom.project_id == proj.id).all()
+        for room in project_rooms:
+            db.query(RoomMember).filter(
+                RoomMember.room_id == room.id,
+                ~RoomMember.user_id.in_(allowed_user_ids)
+            ).delete(synchronize_session=False)
+
+    db.commit()
 
 @router.post("/", response_model=TeamResponse, status_code=status.HTTP_201_CREATED)
 def create_team(
@@ -28,13 +69,11 @@ def create_team(
         owner_id=owner_id
     )
     
-    # Adicionar membros selecionados
     members_to_add = [current_user]
     if team.member_ids:
         users = db.query(User).filter(User.id.in_(team.member_ids)).all()
         members_to_add = users
         
-    # Garantir que o líder está incluído nos membros
     owner = db.query(User).filter(User.id == owner_id).first()
     if owner and owner not in members_to_add:
         members_to_add.append(owner)
@@ -45,7 +84,6 @@ def create_team(
     db.commit()
     db.refresh(db_team)
     
-    # Enviar notificação para cada membro adicionado na criação
     for member in db_team.members:
         notif = Notification(
             user_id=member.id,
@@ -81,7 +119,6 @@ def update_team(
     if team_update.owner_id is not None:
         team.owner_id = team_update.owner_id
     
-    # Identificar membros antigos antes de atualizar
     old_member_ids = {m.id for m in team.members}
 
     if team_update.member_ids is not None:
@@ -101,7 +138,13 @@ def update_team(
 
     db.commit()
     
-    # Descobrir quem são os novos membros adicionados agora para notificar
+    # Sincroniza e remove utilizadores excluídos das salas de chat dos projetos
+    sync_team_removal_from_project_chats(
+        team_id=team_id,
+        remaining_member_ids=[m.id for m in team.members],
+        db=db
+    )
+
     new_member_ids = {m.id for m in team.members}
     added_member_ids = new_member_ids - old_member_ids
 
@@ -127,6 +170,13 @@ def delete_team(
     if not team:
         raise HTTPException(status_code=404, detail="Equipa não encontrada")
     
+    # Remove membros desta equipa de todos os chats dos projetos antes de apagar
+    sync_team_removal_from_project_chats(
+        team_id=team_id,
+        remaining_member_ids=[],
+        db=db
+    )
+
     projects = db.query(Project).filter(Project.team_id == team.id).all()
     for p in projects:
         p.team_id = None

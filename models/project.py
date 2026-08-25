@@ -1,8 +1,14 @@
-from sqlalchemy import Column, ForeignKey, Integer, String, Text, Date
+from sqlalchemy import Column, ForeignKey, Integer, String, Text, Date, Table
 from sqlalchemy.orm import relationship
 from database import Base
 
-
+# Tabela associativa Muitos-para-Muitos entre Projetos e Equipas
+project_teams = Table(
+    "project_teams",
+    Base.metadata,
+    Column("project_id", Integer, ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True),
+    Column("team_id", Integer, ForeignKey("teams.id", ondelete="CASCADE"), primary_key=True)
+)
 
 class Project(Base):
     __tablename__ = "projects"
@@ -16,4 +22,5 @@ class Project(Base):
     due_date = Column(Date, nullable=True)
 
     # Relações
+    teams = relationship("Team", secondary=project_teams, backref="projects")
     tickets = relationship("Ticket", back_populates="project", cascade="all, delete-orphan")

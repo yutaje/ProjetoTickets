@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field
 from typing import Optional, List
-from datetime import date
+from datetime import date, datetime
 
 class SubTaskResponse(BaseModel):
     id: int
@@ -50,6 +50,7 @@ class TicketUpdate(BaseModel):
     session_hours: Optional[float] = None
     task_type: Optional[str] = None
     blocked_by_id: Optional[int] = None
+    completed_at: Optional[datetime] = None  # 🆕 Adicionado para gerir a data de conclusão
     
     creator_id: Optional[int] = None
 
@@ -72,6 +73,7 @@ class TicketResponse(BaseModel):
     attachment_path: Optional[str] = None
     attachment_url: Optional[str] = None
     task_type: Optional[str] = None
+    completed_at: Optional[datetime] = None  # 🆕 Adicionado para devolver a data de conclusão ao frontend
     
     creator_id: Optional[int] = None
 

@@ -255,7 +255,6 @@ def create_ticket(
     s_date = ticket.start_date if ticket.start_date else None
     d_date = ticket.due_date if ticket.due_date else None
 
-    # Validação do Prazo da Tarefa vs. Prazo do Projeto
     if proj_id and d_date:
         proj_obj = db.query(Project).filter(Project.id == proj_id).first()
         if proj_obj and proj_obj.due_date:
@@ -428,20 +427,13 @@ def update_ticket(
 
     role = getattr(current_user, "role", "Member").lower()
     
-    # Validação Granular de Permissão de Edição
     if role not in ["admin", "manager", "gestor de operações", "gestor de projeto", "gestor de projetos"]:
         is_creator = ticket.creator_id == current_user.id
-        is_assignee = ticket.assigned_to_id == current_user.id
-        
-        # Verificar se é líder da equipa do ticket
-        is_team_leader = False
-        if ticket.team_id:
-            team = db.query(Team).filter(Team.id == ticket.team_id).first()
-            if team and (getattr(team, "leader_id", None) == current_user.id or getattr(team, "manager_id", None) == current_user.id):
-                is_team_leader = True
-
-        if not (is_creator or is_assignee or is_team_leader):
-            raise HTTPException(status_code=403, detail="Acesso negado: Não podes editar esta tarefa.")
+        if not is_creator:
+            raise HTTPException(
+                status_code=403, 
+                detail="Acesso negado: Apenas quem criou esta tarefa ou gestores podem editá-la."
+            )
 
     update_data = ticket_data.dict(exclude_unset=True)
     if "description" in update_data and (not update_data["description"] or update_data["description"].strip() == ""):
@@ -466,6 +458,12 @@ def update_ticket(
     for key, value in update_data.items():
         setattr(ticket, key, value)
         
+    # Se atualizou o estado para Done por aqui, garante também a data de conclusão
+    if "status" in update_data and ticket.status == "Done" and not ticket.completed_at:
+        ticket.completed_at = datetime.utcnow()
+    elif "status" in update_data and ticket.status != "Done":
+        ticket.completed_at = None
+
     db.commit()
     db.refresh(ticket)
     
@@ -662,7 +660,6 @@ def start_timer(
     if not ticket:
         raise HTTPException(status_code=404, detail="Tarefa não encontrada.")
 
-    # 1. Regra Estrita: Se a tarefa já está atribuída, APENAS esse utilizador pode iniciar o cronómetro
     if ticket.assigned_to_id and ticket.assigned_to_id != current_user.id:
         assigned_user = db.query(User).filter(User.id == ticket.assigned_to_id).first()
         user_name = assigned_user.name if assigned_user and assigned_user.name else (assigned_user.email if assigned_user else "outro colaborador")
@@ -671,7 +668,6 @@ def start_timer(
             detail=f"⚠️ Apenas o responsável atribuído ({user_name}) pode iniciar o cronómetro desta tarefa. Se pretendes trabalhar nela, deves primeiro atribuí-la a ti próprio."
         )
 
-    # 2. Validar dependência bloqueante
     if ticket.blocked_by_id:
         prereq = db.query(Ticket).filter(Ticket.id == ticket.blocked_by_id).first()
         if prereq and prereq.status.lower() not in ['done', 'concluído', 'concluido']:
@@ -680,11 +676,9 @@ def start_timer(
                 detail=f"⚠️ Não podes iniciar o cronómetro! A tarefa depende da conclusão da tarefa #{prereq.id} ('{prereq.title}')."
             )
 
-    # 3. Se a tarefa estava livre (sem ninguém atribuído), atribui automaticamente a quem deu Play
     if not ticket.assigned_to_id:
         ticket.assigned_to_id = current_user.id
 
-    # 4. Transição automática de estado se estiver Pendente / To Do
     if ticket.status and ticket.status.lower() in ["to do", "a fazer", "pendente"]:
         ticket.status = "In Progress"
 
@@ -715,7 +709,6 @@ def stop_timer(
     start_dt = datetime.fromisoformat(start_str.replace("Z", "+00:00")) if start_str else None
     end_dt = datetime.fromisoformat(end_str.replace("Z", "+00:00")) if end_str else None
 
-    # Grava o log da sessão se houver tempo decorrido
     if session_hours > 0.0001:
         new_log = TimeLog(
             ticket_id=ticket.id,
@@ -728,7 +721,6 @@ def stop_timer(
         db.add(new_log)
         db.commit()
 
-    # Recalcula o total acumulado na tarefa diretamente da soma dos logs
     total_logs = db.query(TimeLog).filter(TimeLog.ticket_id == ticket.id).all()
     ticket.tracked_hours = sum(log.hours_spent for log in total_logs)
     
@@ -751,7 +743,6 @@ def complete_ticket(
     if not db_ticket:
         raise HTTPException(status_code=404, detail="Tarefa não encontrada.")
     
-    # 1. Validar subtarefas pendentes
     uncompleted_subtasks = [
         sub for sub in db_ticket.sub_tasks 
         if not sub.is_completed or getattr(sub, "status", "Pendente") != "Aprovada"
@@ -762,20 +753,19 @@ def complete_ticket(
             detail=f"⚠️ Não podes concluir esta tarefa principal! Ainda existem {len(uncompleted_subtasks)} subtarefa(s) pendentes de conclusão ou aprovação."
         )
 
-    # 2. Se já estiver concluída, evita operações repetidas
     if db_ticket.status == "Done":
         return db_ticket
 
-    # 3. Concluir e parar cronómetro ativo
     db_ticket.final_description = final_description or ""
     db_ticket.status = "Done"
     db_ticket.is_running = False
+    
+    # 🆕 Regista a data e hora exatas da conclusão
+    db_ticket.completed_at = datetime.utcnow()
 
-    # 4. Atualizar tracked_hours estritamente pela soma dos registos reais de TimeLog
     total_logs = db.query(TimeLog).filter(TimeLog.ticket_id == db_ticket.id).all()
     db_ticket.tracked_hours = sum(log.hours_spent for log in total_logs)
 
-    # 5. Upload de anexo se existir
     if file and file.filename:
         file_location = os.path.join(UPLOAD_DIR, file.filename)
         with open(file_location, "wb") as buffer:
@@ -1240,16 +1230,12 @@ def grab_ticket(
         )
         
     ticket.assigned_to_id = current_user.id
-    ticket.status = "In Progress"
+    ticket.status = "To Do"
     
     db.commit()
     db.refresh(ticket)
     log_action(db, current_user.id, "Agarrar Tarefa", f"Agarrou a tarefa #{ticket.id}", ticket_id=ticket.id)
     return ticket
-
-# ==========================================
-# GESTÃO DE SUBTAREFAS (COM FLUXO DE APROVAÇÃO)
-# ==========================================
 
 @router.get("/{ticket_id}/subtasks")
 def get_subtasks(ticket_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
@@ -1440,10 +1426,6 @@ def delete_subtask(subtask_id: int, db: Session = Depends(get_db), current_user:
     db.commit()
     return None
 
-# ==========================================
-# TIPOS DE TAREFA E ADMIN RELATÓRIOS
-# ==========================================
-
 class TaskTypeCreateSchema(BaseModel):
     name: str
 
@@ -1559,13 +1541,12 @@ def return_ticket(
     if not ticket:
         raise HTTPException(status_code=404, detail="Tarefa não encontrada.")
         
-    # 1. Reset ao estado e técnico atribuído
     ticket.status = "To Do"
     ticket.assigned_to_id = None
     ticket.is_running = False
     ticket.return_reason = reason
+    ticket.completed_at = None
     
-    # 2. Injeta o comentário automático visível na aba de comentários da tarefa
     devolution_comment = Comment(
         ticket_id=ticket.id,
         author_id=current_user.id,
@@ -1573,7 +1554,6 @@ def return_ticket(
     )
     db.add(devolution_comment)
 
-    # 3. Regista na auditoria do sistema
     log_action(
         db, 
         current_user.id, 
@@ -1606,16 +1586,12 @@ def grab_team_task(
             raise HTTPException(status_code=400, detail="A tarefa antecedente ainda não está concluída.")
 
     ticket.assigned_to_id = current_user.id
-    ticket.status = "In Progress"
+    ticket.status = "To Do"
     
     db.commit()
     db.refresh(ticket)
     log_action(db, current_user.id, "Agarrar Tarefa de Equipa", f"Puxou para si a tarefa #{ticket.id} - {ticket.title}", ticket_id=ticket.id)
     return ticket
-
-# ==========================================
-# ENDPOINT DE AUDIT LOGS DA TAREFA ESPECÍFICA (COM FILTROS DE DATA)
-# ==========================================
 
 @router.get("/{ticket_id}/audit-logs")
 def get_ticket_audit_logs(
