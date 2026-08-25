@@ -458,7 +458,6 @@ def update_ticket(
     for key, value in update_data.items():
         setattr(ticket, key, value)
         
-    # Se atualizou o estado para Done por aqui, garante também a data de conclusão
     if "status" in update_data and ticket.status == "Done" and not ticket.completed_at:
         ticket.completed_at = datetime.utcnow()
     elif "status" in update_data and ticket.status != "Done":
@@ -759,8 +758,6 @@ def complete_ticket(
     db_ticket.final_description = final_description or ""
     db_ticket.status = "Done"
     db_ticket.is_running = False
-    
-    # 🆕 Regista a data e hora exatas da conclusão
     db_ticket.completed_at = datetime.utcnow()
 
     total_logs = db.query(TimeLog).filter(TimeLog.ticket_id == db_ticket.id).all()
@@ -830,6 +827,36 @@ def check_and_create_deadline_notifications(user: User, db: Session):
         db.commit()
     except Exception as e:
         db.rollback()
+
+@router.post("/admin/reports/remind")
+def send_missing_report_reminder(
+    reminder_data: dict,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    role = getattr(current_user, "role", "Member")
+    if role not in ["Admin", "Manager", "gestor de operações"]:
+        raise HTTPException(status_code=403, detail="Acesso restrito.")
+
+    target_user_id = reminder_data.get("user_id")
+    target_date = reminder_data.get("date")
+
+    if not target_user_id or not target_date:
+        raise HTTPException(status_code=400, detail="Dados em falta.")
+
+    target_user = db.query(User).filter(User.id == target_user_id).first()
+    if not target_user:
+        raise HTTPException(status_code=404, detail="Utilizador não encontrado.")
+
+    notif_msg = f"⚠️ Lembrete: O teu relatório diário referente ao dia {target_date} encontra-se em falta. Por favor, submete-o o mais brevemente possível."
+    
+    db.add(Notification(
+        user_id=target_user.id,
+        message=notif_msg
+    ))
+    db.commit()
+
+    return {"success": True, "message": f"Notificação enviada com sucesso para {target_user.name or target_user.email}!"}
 
 @router.post("/my-day/generate-ai")
 def generate_daily_ai_report(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
@@ -1493,13 +1520,11 @@ def get_admin_users_reports_status(
     result = []
     
     for u in users:
+        # Traz apenas os relatórios que já foram Submetidos ou Validados para o painel de aprovações
         reports = db.query(DailyReport).filter(
             DailyReport.user_id == u.id,
             DailyReport.status.in_(["Submetido", "Validado"])
         ).all()
-        
-        if not reports:
-            continue
         
         reports_list = []
         for r in reports:

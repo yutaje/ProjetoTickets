@@ -76,11 +76,21 @@ def calculate_project_progress(project: Project, db: Session):
     if not tickets:
         return 0.0, 0.0, 0.0
 
+    # 1. Soma total das horas estimadas de todas as tarefas do projeto
     total_est_hours = sum(t.estimated_hours or 0.0 for t in tickets)
+    
+    # 2. Soma das horas reais gastas
     total_tracked_hours = sum(t.tracked_hours or 0.0 for t in tickets)
 
+    # 3. Soma as horas estimadas APENAS das tarefas concluídas ("Done")
+    completed_est_hours = sum(
+        (t.estimated_hours or 0.0) for t in tickets 
+        if t.status and t.status.lower() in ["done", "concluído", "concluido"]
+    )
+
+    # 4. Calcula a percentagem baseada no peso das horas estimadas das tarefas concluídas face ao total estimado
     if total_est_hours > 0:
-        progress = round((total_tracked_hours / total_est_hours) * 100, 1)
+        progress = round((completed_est_hours / total_est_hours) * 100, 1)
     else:
         done_tickets = [t for t in tickets if t.status and t.status.lower() in ["done", "concluído", "concluido"]]
         progress = round((len(done_tickets) / len(tickets)) * 100, 1) if len(tickets) > 0 else 0.0
