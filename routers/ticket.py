@@ -234,6 +234,9 @@ def create_ticket(
     if not ticket.description or ticket.description.strip() == "":
         raise HTTPException(status_code=400, detail="A descrição da tarefa é um campo obrigatório.")
 
+    if not ticket.estimated_hours or ticket.estimated_hours <= 0:
+        raise HTTPException(status_code=400, detail="As horas estimadas são obrigatórias e devem ser superiores a 0.")
+
     role = getattr(current_user, "role", "Member").lower()
     
     if role in ["user", "member", "técnico"]:
@@ -252,6 +255,18 @@ def create_ticket(
     s_date = ticket.start_date if ticket.start_date else None
     d_date = ticket.due_date if ticket.due_date else None
 
+    # Validação do Prazo da Tarefa vs. Prazo do Projeto
+    if proj_id and d_date:
+        proj_obj = db.query(Project).filter(Project.id == proj_id).first()
+        if proj_obj and proj_obj.due_date:
+            task_due = d_date.date() if hasattr(d_date, 'date') else d_date
+            proj_due = proj_obj.due_date.date() if hasattr(proj_obj.due_date, 'date') else proj_obj.due_date
+            if task_due > proj_due:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"⚠️ O prazo da tarefa ({task_due}) não pode ultrapassar a data limite do projeto ({proj_due})."
+                )
+
     db_ticket = Ticket(
         title=ticket.title,
         description=ticket.description,
@@ -264,6 +279,7 @@ def create_ticket(
         due_date=d_date,
         start_date=s_date,
         blocked_by_id=blocked_id,
+        task_type=ticket.task_type or "Geral",
         creator_id=current_user.id 
     )
     db.add(db_ticket)
@@ -629,11 +645,101 @@ def get_ai_focus_recommendation(
         top_task = scored_tasks[0]
         return {"recommendation": f"Análise Operacional Automática: Deves focar-te na tarefa #{top_task['id']} ('{top_task['title']}') devido ao cruzamento da sua prioridade ({top_task['priority']}) com o prazo ({top_task['due_date']})."}
 
+# ==========================================
+# GESTÃO DE CRONÓMETRO E CONCLUSÃO DE TAREFA
+# ==========================================
+
+@router.post("/{ticket_id}/start-timer", response_model=TicketResponse)
+def start_timer(
+    ticket_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    query = db.query(Ticket).filter(Ticket.id == ticket_id)
+    query = filter_tickets_by_permissions(query, current_user, db)
+    ticket = query.first()
+    
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Tarefa não encontrada.")
+
+    # 1. Regra Estrita: Se a tarefa já está atribuída, APENAS esse utilizador pode iniciar o cronómetro
+    if ticket.assigned_to_id and ticket.assigned_to_id != current_user.id:
+        assigned_user = db.query(User).filter(User.id == ticket.assigned_to_id).first()
+        user_name = assigned_user.name if assigned_user and assigned_user.name else (assigned_user.email if assigned_user else "outro colaborador")
+        raise HTTPException(
+            status_code=403,
+            detail=f"⚠️ Apenas o responsável atribuído ({user_name}) pode iniciar o cronómetro desta tarefa. Se pretendes trabalhar nela, deves primeiro atribuí-la a ti próprio."
+        )
+
+    # 2. Validar dependência bloqueante
+    if ticket.blocked_by_id:
+        prereq = db.query(Ticket).filter(Ticket.id == ticket.blocked_by_id).first()
+        if prereq and prereq.status.lower() not in ['done', 'concluído', 'concluido']:
+            raise HTTPException(
+                status_code=400,
+                detail=f"⚠️ Não podes iniciar o cronómetro! A tarefa depende da conclusão da tarefa #{prereq.id} ('{prereq.title}')."
+            )
+
+    # 3. Se a tarefa estava livre (sem ninguém atribuído), atribui automaticamente a quem deu Play
+    if not ticket.assigned_to_id:
+        ticket.assigned_to_id = current_user.id
+
+    # 4. Transição automática de estado se estiver Pendente / To Do
+    if ticket.status and ticket.status.lower() in ["to do", "a fazer", "pendente"]:
+        ticket.status = "In Progress"
+
+    ticket.is_running = True
+    db.commit()
+    db.refresh(ticket)
+    
+    log_action(db, current_user.id, "Início de Cronómetro", f"Iniciou o cronómetro na tarefa #{ticket.id} - {ticket.title}", ticket_id=ticket.id)
+    return ticket
+
+@router.post("/{ticket_id}/stop-timer", response_model=TicketResponse)
+def stop_timer(
+    ticket_id: int,
+    timer_data: dict, 
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Tarefa não encontrada.")
+
+    ticket.is_running = False
+
+    session_hours = timer_data.get("session_hours", 0.0)
+    start_str = timer_data.get("start_time")
+    end_str = timer_data.get("end_time")
+    
+    start_dt = datetime.fromisoformat(start_str.replace("Z", "+00:00")) if start_str else None
+    end_dt = datetime.fromisoformat(end_str.replace("Z", "+00:00")) if end_str else None
+
+    # Grava o log da sessão se houver tempo decorrido
+    if session_hours > 0.0001:
+        new_log = TimeLog(
+            ticket_id=ticket.id,
+            user_id=current_user.id,
+            date=date.today(),
+            hours_spent=session_hours,
+            start_time=start_dt,
+            end_time=end_dt
+        )
+        db.add(new_log)
+        db.commit()
+
+    # Recalcula o total acumulado na tarefa diretamente da soma dos logs
+    total_logs = db.query(TimeLog).filter(TimeLog.ticket_id == ticket.id).all()
+    ticket.tracked_hours = sum(log.hours_spent for log in total_logs)
+    
+    db.commit()
+    db.refresh(ticket)
+    return ticket
+
 @router.put("/{ticket_id}/complete", response_model=TicketResponse)
 def complete_ticket(
     ticket_id: int,
     final_description: Optional[str] = Form(None),
-    tracked_hours: Optional[float] = Form(0.0),
     file: Optional[UploadFile] = File(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
@@ -645,7 +751,7 @@ def complete_ticket(
     if not db_ticket:
         raise HTTPException(status_code=404, detail="Tarefa não encontrada.")
     
-    # 1. Validar subtarefas
+    # 1. Validar subtarefas pendentes
     uncompleted_subtasks = [
         sub for sub in db_ticket.sub_tasks 
         if not sub.is_completed or getattr(sub, "status", "Pendente") != "Aprovada"
@@ -656,44 +762,20 @@ def complete_ticket(
             detail=f"⚠️ Não podes concluir esta tarefa principal! Ainda existem {len(uncompleted_subtasks)} subtarefa(s) pendentes de conclusão ou aprovação."
         )
 
-    # 2. Evitar duplicações caso a tarefa já esteja concluída
+    # 2. Se já estiver concluída, evita operações repetidas
     if db_ticket.status == "Done":
         return db_ticket
 
+    # 3. Concluir e parar cronómetro ativo
     db_ticket.final_description = final_description or ""
     db_ticket.status = "Done"
     db_ticket.is_running = False
 
-    # 3. Gestão Inteligente de Horas (Desconta o que já foi faturado em dias anteriores)
-    if tracked_hours is not None and tracked_hours > 0:
-        already_logged_hours = db.query(TimeLog).filter(
-            TimeLog.ticket_id == db_ticket.id
-        ).all()
-        total_previously_logged = sum(log.hours_spent for log in already_logged_hours)
+    # 4. Atualizar tracked_hours estritamente pela soma dos registos reais de TimeLog
+    total_logs = db.query(TimeLog).filter(TimeLog.ticket_id == db_ticket.id).all()
+    db_ticket.tracked_hours = sum(log.hours_spent for log in total_logs)
 
-        if float(tracked_hours) > total_previously_logged:
-            hours_for_today = round(float(tracked_hours) - total_previously_logged, 4)
-        else:
-            hours_for_today = float(tracked_hours)
-
-        if hours_for_today > 0.001:
-            existing_today_log = db.query(TimeLog).filter(
-                TimeLog.ticket_id == db_ticket.id,
-                TimeLog.user_id == current_user.id,
-                TimeLog.date == date.today(),
-                TimeLog.hours_spent == hours_for_today
-            ).first()
-
-            if not existing_today_log:
-                new_log = TimeLog(
-                    ticket_id=db_ticket.id,
-                    user_id=current_user.id,
-                    date=date.today(),
-                    hours_spent=hours_for_today
-                )
-                db.add(new_log)
-
-    # 4. Upload de anexo
+    # 5. Upload de anexo se existir
     if file and file.filename:
         file_location = os.path.join(UPLOAD_DIR, file.filename)
         with open(file_location, "wb") as buffer:
@@ -1165,41 +1247,6 @@ def grab_ticket(
     log_action(db, current_user.id, "Agarrar Tarefa", f"Agarrou a tarefa #{ticket.id}", ticket_id=ticket.id)
     return ticket
 
-@router.post("/{ticket_id}/stop-timer", response_model=TicketResponse)
-def stop_timer(
-    ticket_id: int,
-    timer_data: dict, 
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
-    if not ticket:
-        raise HTTPException(status_code=404, detail="Tarefa não encontrada")
-
-    ticket.is_running = False
-    if "tracked_hours" in timer_data:
-        ticket.tracked_hours = timer_data["tracked_hours"]
-
-    start_str = timer_data.get("start_time")
-    end_str = timer_data.get("end_time")
-    
-    start_dt = datetime.fromisoformat(start_str.replace("Z", "+00:00")) if start_str else None
-    end_dt = datetime.fromisoformat(end_str.replace("Z", "+00:00")) if end_str else None
-
-    new_log = TimeLog(
-        ticket_id=ticket.id,
-        user_id=current_user.id,
-        date=date.today(),
-        hours_spent=timer_data.get("session_hours", 0.0),
-        start_time=start_dt,
-        end_time=end_dt
-    )
-    
-    db.add(new_log)
-    db.commit()
-    db.refresh(ticket)
-    return ticket
-
 # ==========================================
 # GESTÃO DE SUBTAREFAS (COM FLUXO DE APROVAÇÃO)
 # ==========================================
@@ -1567,12 +1614,14 @@ def grab_team_task(
     return ticket
 
 # ==========================================
-# ENDPOINT DE AUDIT LOGS DA TAREFA ESPECÍFICA
+# ENDPOINT DE AUDIT LOGS DA TAREFA ESPECÍFICA (COM FILTROS DE DATA)
 # ==========================================
 
 @router.get("/{ticket_id}/audit-logs")
 def get_ticket_audit_logs(
     ticket_id: int,
+    start_date: Optional[date] = Query(None),
+    end_date: Optional[date] = Query(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -1580,7 +1629,14 @@ def get_ticket_audit_logs(
     if not ticket:
         raise HTTPException(status_code=404, detail="Tarefa não encontrada.")
         
-    logs = db.query(AuditLog).filter(AuditLog.ticket_id == ticket_id).order_by(AuditLog.created_at.desc()).all()
+    query = db.query(AuditLog).filter(AuditLog.ticket_id == ticket_id)
+    
+    if start_date:
+        query = query.filter(AuditLog.created_at >= datetime.combine(start_date, datetime.min.time()))
+    if end_date:
+        query = query.filter(AuditLog.created_at <= datetime.combine(end_date, datetime.max.time()))
+        
+    logs = query.order_by(AuditLog.created_at.desc()).all()
     
     lista_logs = []
     for log in logs:

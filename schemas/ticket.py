@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List
 from datetime import date
 
@@ -21,16 +21,16 @@ class TicketCreate(BaseModel):
     title: str
     description: Optional[str] = None
     priority: Optional[str] = "Média"
-    status: Optional[str] = "To Do" # No futuro, podemos mudar para "Pendente" no React
+    status: Optional[str] = "To Do"
     project_id: Optional[int] = None
     client_id: Optional[int] = None
     assigned_to_id: Optional[int] = None
-    estimated_hours: Optional[float] = 0.0
+    # Campo obrigatório e superior a zero
+    estimated_hours: float = Field(..., gt=0, description="As horas estimadas são obrigatórias e devem ser superiores a 0.")
     due_date: Optional[date] = None
     start_date: Optional[date] = None
     task_type: Optional[str] = "Geral"
     
-    # --- NOVA LINHA: Quem está a criar a tarefa ---
     creator_id: Optional[int] = None
     blocked_by_id: Optional[int] = None
 
@@ -51,7 +51,6 @@ class TicketUpdate(BaseModel):
     task_type: Optional[str] = None
     blocked_by_id: Optional[int] = None
     
-    # --- NOVA LINHA: Caso um Admin precise de transferir o dono da tarefa ---
     creator_id: Optional[int] = None
 
 class TicketResponse(BaseModel):
@@ -74,10 +73,9 @@ class TicketResponse(BaseModel):
     attachment_url: Optional[str] = None
     task_type: Optional[str] = None
     
-    # --- NOVA LINHA: Para o React bloquear botões se o user não for o criador ---
     creator_id: Optional[int] = None
 
-    # --- LISTA DE SUBTAREFAS (essencial para o retorno do JSON completo) ---
+    # LISTA DE SUBTAREFAS
     sub_tasks: List[SubTaskResponse] = []
 
     class Config:

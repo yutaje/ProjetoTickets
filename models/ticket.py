@@ -40,6 +40,8 @@ class Ticket(Base):
 
     final_description = Column(String, nullable=True)
     attachment_path = Column(String, nullable=True)
+
+    task_type = Column(String, default="Geral", nullable=True)
     
     estimated_hours = Column(Float, default=0.0)
     tracked_hours = Column(Float, default=0.0)

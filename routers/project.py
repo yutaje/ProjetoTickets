@@ -14,16 +14,35 @@ router = APIRouter(
     tags=["Projects"]
 )
 
+def calculate_project_progress(project: Project, db: Session):
+    tickets = db.query(Ticket).filter(Ticket.project_id == project.id).all()
+    if not tickets:
+        return 0.0, 0.0, 0.0
+
+    total_est_hours = sum(t.estimated_hours or 0.0 for t in tickets)
+    
+    # Tarefas concluídas
+    done_tickets = [t for t in tickets if t.status and t.status.lower() in ["done", "concluído", "concluido"]]
+    done_est_hours = sum(t.estimated_hours or 0.0 for t in done_tickets)
+
+    # Se existirem horas estimadas definidas, calcula pela soma das horas estimadas concluídas vs total
+    if total_est_hours > 0:
+        progress = round((done_est_hours / total_est_hours) * 100, 1)
+    else:
+        # Fallback para contagem unitária de tarefas caso ainda não haja estimativas
+        progress = round((len(done_tickets) / len(tickets)) * 100, 1) if len(tickets) > 0 else 0.0
+
+    return min(progress, 100.0), round(total_est_hours, 2), round(done_est_hours, 2)
+
 @router.get("/", response_model=List[ProjectResponse])
 def get_projects(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     role = getattr(current_user, "role", "Member").lower()
     
     # 1. Admin, Gestor de Operações e Gestor de Projetos vêem TODOS os projetos
     if role in ["admin", "manager", "gestor de operações", "gestor de projeto", "gestor de projetos"]:
-        return db.query(Project).all()
-        
+        projects = db.query(Project).all()
     # 2. Líder de Equipa: vê apenas projetos associados às tarefas da sua equipa
-    if "líder de equipa" in role or "lider de equipa" in role:
+    elif "líder de equipa" in role or "lider de equipa" in role:
         led_teams = db.query(Team).filter(
             (getattr(Team, "leader_id", None) == current_user.id) |
             (getattr(Team, "manager_id", None) == current_user.id)
@@ -43,16 +62,34 @@ def get_projects(db: Session = Depends(get_db), current_user: User = Depends(get
         ).distinct().all()
         
         valid_ids = [p[0] for p in project_ids if p[0] is not None]
-        return db.query(Project).filter(Project.id.in_(valid_ids)).all()
-
+        projects = db.query(Project).filter(Project.id.in_(valid_ids)).all()
     # 3. Técnico / Member: apenas projetos onde tem tarefas atribuídas ou criadas
-    user_project_ids = db.query(Ticket.project_id).filter(
-        (Ticket.assigned_to_id == current_user.id) |
-        (Ticket.creator_id == current_user.id)
-    ).distinct().all()
-    
-    valid_ids = [p[0] for p in user_project_ids if p[0] is not None]
-    return db.query(Project).filter(Project.id.in_(valid_ids)).all()
+    else:
+        user_project_ids = db.query(Ticket.project_id).filter(
+            (Ticket.assigned_to_id == current_user.id) |
+            (Ticket.creator_id == current_user.id)
+        ).distinct().all()
+        
+        valid_ids = [p[0] for p in user_project_ids if p[0] is not None]
+        projects = db.query(Project).filter(Project.id.in_(valid_ids)).all()
+
+    # Injeta os cálculos de progresso em cada projeto
+    results = []
+    for proj in projects:
+        progress, total_h, done_h = calculate_project_progress(proj, db)
+        results.append(ProjectResponse(
+            id=proj.id,
+            name=proj.name,
+            description=proj.description,
+            team_id=proj.team_id,
+            client_id=proj.client_id,
+            due_date=getattr(proj, "due_date", None),
+            progress_percentage=progress,
+            total_estimated_hours=total_h,
+            completed_estimated_hours=done_h
+        ))
+
+    return results
 
 @router.post("/", response_model=ProjectResponse, status_code=status.HTTP_201_CREATED)
 def create_project(
@@ -69,7 +106,7 @@ def create_project(
         description=project.description,
         team_id=project.team_id,
         client_id=project.client_id,
-        
+        due_date=project.due_date
     )
     db.add(db_project)
     db.commit()
@@ -81,7 +118,18 @@ def create_project(
         )
         db.commit()
 
-    return db_project
+    progress, total_h, done_h = calculate_project_progress(db_project, db)
+    return ProjectResponse(
+        id=db_project.id,
+        name=db_project.name,
+        description=db_project.description,
+        team_id=db_project.team_id,
+        client_id=db_project.client_id,
+        due_date=getattr(db_project, "due_date", None),
+        progress_percentage=progress,
+        total_estimated_hours=total_h,
+        completed_estimated_hours=done_h
+    )
 
 @router.put("/{project_id}", response_model=ProjectResponse)
 def update_project(
@@ -108,6 +156,9 @@ def update_project(
     else:
         db_proj.team_id = None
 
+    if project_update.due_date is not None:
+        db_proj.due_date = project_update.due_date
+
     db_proj.client_id = project_update.client_id
     db.commit()
     
@@ -124,7 +175,19 @@ def update_project(
     
     db.commit()
     db.refresh(db_proj)
-    return db_proj
+
+    progress, total_h, done_h = calculate_project_progress(db_proj, db)
+    return ProjectResponse(
+        id=db_proj.id,
+        name=db_proj.name,
+        description=db_proj.description,
+        team_id=db_proj.team_id,
+        client_id=db_proj.client_id,
+        due_date=getattr(db_proj, "due_date", None),
+        progress_percentage=progress,
+        total_estimated_hours=total_h,
+        completed_estimated_hours=done_h
+    )
 
 @router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_project(
