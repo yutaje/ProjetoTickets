@@ -34,18 +34,38 @@ def get_project_member_ids(project_id: int, db: Session) -> list[int]:
     team_ids = list(set(team_ids))
     member_ids = []
     
+    # 1. Adicionar membros das equipas associadas
     if team_ids:
         teams = db.query(Team).filter(Team.id.in_(team_ids)).all()
         for t in teams:
+            if getattr(t, "owner_id", None):
+                member_ids.append(t.owner_id)
             if getattr(t, "leader_id", None):
                 member_ids.append(t.leader_id)
-            if getattr(t, "manager_id", None):
-                member_ids.append(t.manager_id)
             if hasattr(t, "members"):
                 member_ids.extend([m.id for m in t.members if hasattr(m, "id")])
             if hasattr(t, "users"):
                 member_ids.extend([u.id for u in t.users if hasattr(u, "id")])
-                
+
+    # 2. Adicionar o Gestor do Projeto (Project Manager), se existir
+    manager_id = getattr(project, "manager_id", None) or getattr(project, "project_manager_id", None)
+    if manager_id:
+        member_ids.append(manager_id)
+
+    # 3. Filtrar administradores globais (impedem que admins entrem automaticamente no chat geral 
+    # a menos que estejam explicitamente na equipa ou sejam o gestor do projeto)
+    if member_ids:
+        valid_users = db.query(User).filter(User.id.in_(member_ids)).all()
+        filtered_ids = []
+        for u in valid_users:
+            user_role = (getattr(u, "role", "") or "").lower()
+            if user_role == "admin":
+                if u.id == manager_id:
+                    filtered_ids.append(u.id)
+            else:
+                filtered_ids.append(u.id)
+        member_ids = filtered_ids
+
     return list(set(member_ids))
 
 @router.get("/rooms")
@@ -152,6 +172,16 @@ def sync_project_general_room(project_id: int, current_user_id: int, db: Session
 def create_room(room_data: ChatRoomCreate, current_user_id: int = Query(...), db: Session = Depends(get_db)):
     member_ids = list(set(room_data.member_ids + [current_user_id]))
     
+    # Validação de segurança para subchats de projeto
+    if room_data.project_id:
+        allowed_project_members = get_project_member_ids(room_data.project_id, db)
+        for uid in member_ids:
+            if uid not in allowed_project_members:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"O utilizador #{uid} não pertence às equipas associadas a este projeto."
+                )
+
     if not room_data.force_create and room_data.project_id:
         existing_rooms = db.query(ChatRoom).filter(ChatRoom.project_id == room_data.project_id).all()
         for r in existing_rooms:

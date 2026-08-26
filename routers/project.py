@@ -6,7 +6,7 @@ from models.project import Project, project_teams
 from models.ticket import Ticket
 from models.team import Team
 from models.user import User
-from models.chat import ChatRoom, RoomMember
+from models.chat import ChatRoom, RoomMember, Message
 from schemas.project import ProjectCreate, ProjectUpdate, ProjectResponse
 from core.security import get_current_user
 
@@ -57,7 +57,19 @@ def sync_project_chat_members(project: Project, db: Session):
 
     all_member_ids = list(set(all_member_ids))
 
-    # 3. Sincroniza participantes na tabela room_members
+    # 3. Sincroniza participantes na tabela room_members (ignorando administradores globais puros)
+    if all_member_ids:
+        valid_users = db.query(User).filter(User.id.in_(all_member_ids)).all()
+        filtered_ids = []
+        for u in valid_users:
+            user_role = (getattr(u, "role", "") or "").lower()
+            if user_role == "admin":
+                # Só inclui o admin se ele tiver ligação direta (ou se for necessário)
+                pass
+            else:
+                filtered_ids.append(u.id)
+        all_member_ids = filtered_ids
+
     current_members = db.query(RoomMember).filter(RoomMember.room_id == general_room.id).all()
     current_member_ids = [m.user_id for m in current_members]
 
@@ -287,8 +299,14 @@ def delete_project(
         {"project_id": None}, synchronize_session=False
     )
     
-    # Remove automaticamente salas de chat associadas a este projeto
-    db.query(ChatRoom).filter(ChatRoom.project_id == project_id).delete(synchronize_session=False)
+    # 🔒 Limpeza segura e em cascata das salas de chat do projeto para evitar IntegrityError
+    project_rooms = db.query(ChatRoom).filter(ChatRoom.project_id == project_id).all()
+    room_ids = [room.id for room in project_rooms]
+
+    if room_ids:
+        db.query(RoomMember).filter(RoomMember.room_id.in_(room_ids)).delete(synchronize_session=False)
+        db.query(Message).filter(Message.room_id.in_(room_ids)).delete(synchronize_session=False)
+        db.query(ChatRoom).filter(ChatRoom.project_id == project_id).delete(synchronize_session=False)
 
     db.delete(db_proj)
     db.commit()

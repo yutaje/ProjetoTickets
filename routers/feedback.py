@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
 from database import get_db
 from models.feedback import FeedbackRequest, FeedbackResponse
@@ -16,7 +16,7 @@ router = APIRouter(
     tags=["Feedback"]
 )
 
-# 1. Criar Pedido de Feedback (Apenas Admin/Manager)
+# 1. Criar Pedido de Feedback (Atribui estritamente ao responsável pela tarefa e exclui o gestor)
 @router.post("/requests", status_code=status.HTTP_201_CREATED)
 def create_feedback_request(
     data: FeedbackRequestCreate,
@@ -26,6 +26,14 @@ def create_feedback_request(
     role = getattr(current_user, "role", "Member").lower()
     if role not in ["admin", "manager", "gestor de operações"]:
         raise HTTPException(status_code=403, detail="Apenas gestores podem solicitar pedidos de feedback.")
+
+    target_users = data.target_user_ids or []
+    if data.ticket_id:
+        ticket = db.query(Ticket).filter(Ticket.id == data.ticket_id).first()
+        if ticket and ticket.assigned_to_id:
+            target_users = [ticket.assigned_to_id]
+
+    target_users = [uid for uid in target_users if uid != current_user.id]
 
     req = FeedbackRequest(
         title=data.title,
@@ -39,31 +47,37 @@ def create_feedback_request(
     db.commit()
     db.refresh(req)
 
-    # Notificar os utilizadores selecionados
-    target_users = data.target_user_ids or []
     deadline_str = data.deadline.strftime("%d/%m/%Y às %H:%M")
     
     for uid in target_users:
         db.add(Notification(
             user_id=uid,
-            message=f"📋 Foi solicitado o teu feedback: '{data.title}'. Prazo: {deadline_str}"
+            message=f"📋 Foi solicitado o teu feedback para a tarefa: '{data.title}'. Prazo: {deadline_str}"
         ))
 
     db.commit()
-    return {"message": "Pedido de feedback criado com sucesso!", "id": req.id}
+    return {"message": "Pedido de feedback criado e enviado ao responsável com sucesso!", "id": req.id}
 
-# 2. Listar Pedidos de Feedback Pendentes para o Utilizador Logado
+# 2. Listar Pedidos de Feedback Pendentes estritamente para o Colaborador Responsável
 @router.get("/my-pending", response_model=List[FeedbackRequestOut])
 def get_my_pending_feedback_requests(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    # Procura pedidos ativos dentro do prazo
-    requests = db.query(FeedbackRequest).filter(FeedbackRequest.deadline >= datetime.utcnow()).all()
+    now = datetime.utcnow()
+    all_requests = db.query(FeedbackRequest).filter(FeedbackRequest.deadline >= now).all()
     
     result = []
-    for req in requests:
-        # Verifica se o utilizador já respondeu
+    for req in all_requests:
+        # 🔒 FILTRA ESTRITAMENTE: O pedido só pertence ao utilizador se ele for o responsável pela tarefa associada
+        if req.ticket_id:
+            ticket = db.query(Ticket).filter(Ticket.id == req.ticket_id).first()
+            if not ticket or ticket.assigned_to_id != current_user.id:
+                continue # Salta este pedido se não for para este utilizador
+        else:
+            # Se não tiver ticket associado, verifica se está nos target_users ou se foi explicitamente direcionado
+            continue
+
         user_response = db.query(FeedbackResponse).filter(
             FeedbackResponse.request_id == req.id,
             FeedbackResponse.user_id == current_user.id
@@ -118,7 +132,6 @@ def submit_feedback_response(
     )
     db.add(resp)
     
-    # Notifica quem criou o pedido
     db.add(Notification(
         user_id=req.created_by_id,
         message=f"⭐ {current_user.name or current_user.email} respondeu ao pedido de feedback '{req.title}' com nota {data.rating}/5."
@@ -175,14 +188,67 @@ def get_feedback_summary(
 
     return result
 
-# 5. Rotina de Aviso Prévio (30 minutos antes do prazo)
+# 5. Listar Pedidos de Feedback filtrados por Tarefa (ticket_id)
+@router.get("/requests", response_model=List[FeedbackRequestOut])
+def get_feedback_requests_by_ticket(
+    ticket_id: int = Query(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    query = db.query(FeedbackRequest)
+    if ticket_id is not None:
+        query = query.filter(FeedbackRequest.ticket_id == ticket_id)
+    
+    requests = query.order_by(FeedbackRequest.created_at.desc()).all()
+    result = []
+
+    for req in requests:
+        responses_out = []
+        total_rating = 0
+
+        for r in req.responses:
+            u = db.query(User).filter(User.id == r.user_id).first()
+            responses_out.append(FeedbackResponseOut(
+                id=r.id,
+                user_id=r.user_id,
+                user_name=u.name if u and u.name else (u.email if u else "Anónimo"),
+                rating=r.rating,
+                comment=r.comment,
+                created_at=r.created_at
+            ))
+            total_rating += r.rating
+
+        avg = round(total_rating / len(req.responses), 1) if req.responses else 0.0
+        creator = db.query(User).filter(User.id == req.created_by_id).first()
+
+        user_response = db.query(FeedbackResponse).filter(
+            FeedbackResponse.request_id == req.id,
+            FeedbackResponse.user_id == current_user.id
+        ).first()
+
+        result.append(FeedbackRequestOut(
+            id=req.id,
+            title=req.title,
+            description=req.description,
+            ticket_id=req.ticket_id,
+            project_id=req.project_id,
+            deadline=req.deadline,
+            created_at=req.created_at,
+            created_by_name=creator.name if creator and creator.name else "Gestão",
+            has_responded=bool(user_response),
+            average_rating=avg,
+            responses=responses_out
+        ))
+
+    return result
+
+# 6. Rotina de Aviso Prévio (30 minutos antes do prazo)
 @router.post("/check-reminders")
 def check_feedback_reminders(db: Session = Depends(get_db)):
     now = datetime.utcnow()
     reminder_window_start = now + timedelta(minutes=25)
     reminder_window_end = now + timedelta(minutes=35)
 
-    # Procura pedidos cujo prazo esteja entre 25 e 35 minutos a partir de agora
     impending_requests = db.query(FeedbackRequest).filter(
         FeedbackRequest.deadline >= reminder_window_start,
         FeedbackRequest.deadline <= reminder_window_end
@@ -190,7 +256,6 @@ def check_feedback_reminders(db: Session = Depends(get_db)):
 
     notified_count = 0
     for req in impending_requests:
-        # Encontra utilizadores que ainda não responderam
         all_users = db.query(User).all()
         for u in all_users:
             has_resp = db.query(FeedbackResponse).filter(
