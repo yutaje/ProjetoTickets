@@ -63,18 +63,15 @@ def log_action(db: Session, user_id: int, action: str, details: str, ticket_id: 
 def filter_tickets_by_permissions(query, current_user: User, db: Session):
     role = getattr(current_user, "role", "Member").lower()
     
-    # 1. Admin, Gestor de Operações e Gestor de Projetos têm visão total de todas as tarefas
     if role in ["admin", "manager", "gestor de operações", "gestor de projeto", "gestor de projetos"]:
         return query
 
-    # 2. Descobrir as Equipas onde o utilizador é Líder / Gestor de Equipa
     led_teams = db.query(Team).filter(
         (getattr(Team, "leader_id", None) == current_user.id) |
         (getattr(Team, "manager_id", None) == current_user.id)
     ).all()
     led_team_ids = [t.id for t in led_teams]
 
-    # Obter os IDs dos membros dessas equipas lideradas
     team_member_ids = []
     for t in led_teams:
         if hasattr(t, "members"):
@@ -83,14 +80,12 @@ def filter_tickets_by_permissions(query, current_user: User, db: Session):
             team_member_ids.extend([u.id for u in t.users])
     team_member_ids = list(set(team_member_ids))
 
-    # 3. Condições base para Técnicos / Colaboradores
     conditions = [
         Ticket.assigned_to_id == current_user.id,
         Ticket.creator_id == current_user.id,
         SubTask.assigned_to_id == current_user.id
     ]
 
-    # 4. Se for Líder de Equipa: apenas vê tarefas da sua equipa ou atribuídas aos membros dela
     if "líder de equipa" in role or "lider de equipa" in role or led_team_ids:
         if led_team_ids:
             conditions.append(Ticket.team_id.in_(led_team_ids))
@@ -455,6 +450,11 @@ def update_ticket(
                 detail=f"⚠️ Esta tarefa depende da conclusão da tarefa #{prereq.id} ('{prereq.title}') e ainda não pode ser iniciada."
             )
 
+    # 🕒 Lógica automática: Se mudar para Revisão ou Concluído e estiver a correr, desliga o is_running
+    if target_status and target_status != old_status:
+        if target_status.lower() in ['in review', 'em revisão', 'em revisao', 'done', 'concluído', 'concluido'] and ticket.is_running:
+            ticket.is_running = False
+
     for key, value in update_data.items():
         setattr(ticket, key, value)
         
@@ -709,15 +709,20 @@ def stop_timer(
     end_dt = datetime.fromisoformat(end_str.replace("Z", "+00:00")) if end_str else None
 
     if session_hours > 0.0001:
-        new_log = TimeLog(
-            ticket_id=ticket.id,
-            user_id=current_user.id,
-            date=date.today(),
-            hours_spent=session_hours,
-            start_time=start_dt,
-            end_time=end_dt
-        )
-        db.add(new_log)
+        current_status = (ticket.status or "").lower()
+        # 🔄 Se estiver em revisão, guarda o tempo em 'review_tracked_hours' separado do trabalho principal
+        if current_status in ["in review", "em revisão", "em revisao"]:
+            ticket.review_tracked_hours = (ticket.review_tracked_hours or 0.0) + session_hours
+        else:
+            new_log = TimeLog(
+                ticket_id=ticket.id,
+                user_id=current_user.id,
+                date=date.today(),
+                hours_spent=session_hours,
+                start_time=start_dt,
+                end_time=end_dt
+            )
+            db.add(new_log)
         db.commit()
 
     total_logs = db.query(TimeLog).filter(TimeLog.ticket_id == ticket.id).all()
@@ -1520,7 +1525,6 @@ def get_admin_users_reports_status(
     result = []
     
     for u in users:
-        # Traz apenas os relatórios que já foram Submetidos ou Validados para o painel de aprovações
         reports = db.query(DailyReport).filter(
             DailyReport.user_id == u.id,
             DailyReport.status.in_(["Submetido", "Validado"])

@@ -44,13 +44,14 @@ class TicketUpdate(BaseModel):
     assigned_to_id: Optional[int] = None
     estimated_hours: Optional[float] = None
     tracked_hours: Optional[float] = None
+    review_tracked_hours: Optional[float] = None  # 🔍 Adicionado para permitir atualizar o tempo de revisão se necessário
     due_date: Optional[date] = None
     start_date: Optional[date] = None
     is_running: Optional[bool] = None
     session_hours: Optional[float] = None
     task_type: Optional[str] = None
     blocked_by_id: Optional[int] = None
-    completed_at: Optional[datetime] = None  # 🆕 Adicionado para gerir a data de conclusão
+    completed_at: Optional[datetime] = None  
     
     creator_id: Optional[int] = None
 
@@ -65,6 +66,7 @@ class TicketResponse(BaseModel):
     assigned_to_id: Optional[int] = None
     estimated_hours: float
     tracked_hours: float
+    review_tracked_hours: Optional[float] = 0.0  # 🔍 Adicionado para devolver o tempo de revisão ao frontend
     due_date: Optional[date] = None
     start_date: Optional[date] = None
     is_running: bool
@@ -73,7 +75,7 @@ class TicketResponse(BaseModel):
     attachment_path: Optional[str] = None
     attachment_url: Optional[str] = None
     task_type: Optional[str] = None
-    completed_at: Optional[datetime] = None  # 🆕 Adicionado para devolver a data de conclusão ao frontend
+    completed_at: Optional[datetime] = None  
     
     creator_id: Optional[int] = None
 

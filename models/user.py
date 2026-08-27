@@ -11,10 +11,9 @@ class User(Base):
     email = Column(String(150), unique=True, index=True, nullable=False)
     hashed_password = Column(String(255), nullable=False)
     
-    role = Column(String(50), default="operator") 
+    role = Column(String(50), default="Técnico") 
     is_active = Column(Boolean, default=True)
 
-
-    #relacoes
+    # Relações
     tickets = relationship("Ticket", back_populates="assignee", foreign_keys="[Ticket.assigned_to_id]")
     comments = relationship("Comment", back_populates="author")

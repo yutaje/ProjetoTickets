@@ -10,6 +10,13 @@ class FeedbackRequestCreate(BaseModel):
     target_user_ids: Optional[List[int]] = [] # IDs dos utilizadores a quem se pede feedback
     deadline: datetime
 
+    feedback_type: Optional[str] = "pontual"
+    interval_value: Optional[int] = 1
+    interval_unit: Optional[str] = "days"
+    cyclic_time: Optional[str] = None
+
+
+
 class FeedbackResponseCreate(BaseModel):
     rating: int = Field(..., ge=1, le=5)
     comment: Optional[str] = None

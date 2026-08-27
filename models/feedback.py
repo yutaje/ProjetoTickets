@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, Text
+from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, Text, Float
 from sqlalchemy.orm import relationship
 from database import Base
 from datetime import datetime
@@ -15,8 +15,17 @@ class FeedbackRequest(Base):
     created_by_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     
     # Prazo limite para resposta
+    
+
+    feedback_type = Column(String, default="pontual") 
+    interval_value = Column(Integer, default=1)       
+    interval_unit = Column(String, default="days")        
+    cyclic_time = Column(String, nullable=True)
+
+
     deadline = Column(DateTime, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
+
 
     # Relações
     creator = relationship("User", foreign_keys=[created_by_id])

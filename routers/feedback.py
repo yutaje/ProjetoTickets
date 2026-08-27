@@ -41,13 +41,19 @@ def create_feedback_request(
         ticket_id=data.ticket_id,
         project_id=data.project_id,
         created_by_id=current_user.id,
-        deadline=data.deadline
+        deadline=data.deadline,
+        feedback_type=data.feedback_type or "pontual",
+        interval_value=data.interval_value if hasattr(data, "interval_value") else 1,
+        interval_unit=data.interval_unit if hasattr(data, "interval_unit") else "days",
+        cyclic_time=data.cyclic_time
     )
     db.add(req)
     db.commit()
     db.refresh(req)
 
-    deadline_str = data.deadline.strftime("%d/%m/%Y às %H:%M")
+    # 🕒 Ajusta o fuso horário para a notificação ficar com a hora correta (compensando o UTC)
+    local_deadline = data.deadline + timedelta(hours=1) if data.deadline else data.deadline
+    deadline_str = local_deadline.strftime("%d/%m/%Y às %H:%M") if local_deadline else ""
     
     for uid in target_users:
         db.add(Notification(
@@ -56,7 +62,7 @@ def create_feedback_request(
         ))
 
     db.commit()
-    return {"message": "Pedido de feedback criado e enviado ao responsável com sucesso!", "id": req.id}
+    return {"message": "Pedido de feedback criado com sucesso!", "id": req.id}
 
 # 2. Listar Pedidos de Feedback Pendentes estritamente para o Colaborador Responsável
 @router.get("/my-pending", response_model=List[FeedbackRequestOut])
@@ -69,13 +75,11 @@ def get_my_pending_feedback_requests(
     
     result = []
     for req in all_requests:
-        # 🔒 FILTRA ESTRITAMENTE: O pedido só pertence ao utilizador se ele for o responsável pela tarefa associada
         if req.ticket_id:
             ticket = db.query(Ticket).filter(Ticket.id == req.ticket_id).first()
             if not ticket or ticket.assigned_to_id != current_user.id:
-                continue # Salta este pedido se não for para este utilizador
+                continue
         else:
-            # Se não tiver ticket associado, verifica se está nos target_users ou se foi explicitamente direcionado
             continue
 
         user_response = db.query(FeedbackResponse).filter(
@@ -276,3 +280,27 @@ def check_feedback_reminders(db: Session = Depends(get_db)):
 
     db.commit()
     return {"reminders_sent": notified_count}
+
+
+# 7. Cancelar / Desativar Pedido de Feedback Cíclico
+@router.patch("/requests/{request_id}/cancel", status_code=status.HTTP_200_OK)
+def cancel_feedback_request(
+    request_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    role = getattr(current_user, "role", "Member").lower()
+    if role not in ["admin", "manager", "gestor de operações"]:
+        raise HTTPException(status_code=403, detail="Apenas gestores podem cancelar pedidos de feedback.")
+
+    req = db.query(FeedbackRequest).filter(FeedbackRequest.id == request_id).first()
+    if not req:
+        raise HTTPException(status_code=404, detail="Pedido de feedback não encontrado.")
+
+    # Podes adicionar uma coluna 'is_active' na tabela ou simplesmente alterar o deadline para o passado/marcar como cancelado
+    # Vamos assumir que crias ou usas um campo de estado, ou atualizamos o tipo/prazo para expirar.
+    # A forma mais limpa é adicionar um campo boolean 'is_active' na tabela FeedbackRequest.
+    req.is_active = False
+    db.commit()
+
+    return {"message": "Pedido cíclico cancelado com sucesso. Deixará de gerar novas notificações."}

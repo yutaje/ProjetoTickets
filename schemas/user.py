@@ -1,11 +1,11 @@
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 from typing import Optional
 
 
 class UserBase(BaseModel):
     name: str
     email: EmailStr
-    role: str = "operator"
+    role: str = Field(default="Técnico", description="Cargo do utilizador")
     is_active: bool = True
 
 
@@ -18,6 +18,7 @@ class UserUpdate(BaseModel):
     email: Optional[EmailStr] = None
     password: Optional[str] = None
     role: Optional[str] = None
+    is_active: Optional[bool] = None
 
 
 class UserResponse(UserBase):
@@ -25,8 +26,3 @@ class UserResponse(UserBase):
 
     class Config:
         from_attributes = True
-
-
-
-
-

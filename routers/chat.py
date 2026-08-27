@@ -1,6 +1,6 @@
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from database import get_db
 from models.chat import ChatRoom, RoomMember, Message
 from models.project import Project
@@ -23,6 +23,8 @@ def get_project_member_ids(project_id: int, db: Session) -> list[int]:
         return []
         
     team_ids = []
+    
+    # 1. Obter equipas ligadas ao projeto
     if getattr(project, "team_ids", None) and isinstance(project.team_ids, list):
         team_ids.extend(project.team_ids)
     elif getattr(project, "team_id", None):
@@ -30,43 +32,54 @@ def get_project_member_ids(project_id: int, db: Session) -> list[int]:
         
     if getattr(project, "teams", None):
         team_ids.extend([t.id for t in project.teams if hasattr(t, "id")])
-        
+
+    # 2. Obter projetos associados a partir da lista das equipas
+    all_teams = db.query(Team).all()
+    for t in all_teams:
+        proj_ids = getattr(t, "project_ids", []) or []
+        if getattr(t, "project_id", None) == project_id or project_id in proj_ids:
+            team_ids.append(t.id)
+
     team_ids = list(set(team_ids))
     member_ids = []
     
-    # 1. Adicionar membros das equipas associadas
+    # 3. Adicionar membros e líderes das equipas
     if team_ids:
-        teams = db.query(Team).filter(Team.id.in_(team_ids)).all()
-        for t in teams:
+        matched_teams = db.query(Team).filter(Team.id.in_(team_ids)).all()
+        for t in matched_teams:
             if getattr(t, "owner_id", None):
                 member_ids.append(t.owner_id)
             if getattr(t, "leader_id", None):
                 member_ids.append(t.leader_id)
-            if hasattr(t, "members"):
-                member_ids.extend([m.id for m in t.members if hasattr(m, "id")])
-            if hasattr(t, "users"):
-                member_ids.extend([u.id for u in t.users if hasattr(u, "id")])
+            if hasattr(t, "members") and t.members:
+                for m in t.members:
+                    if hasattr(m, "id"):
+                        member_ids.append(m.id)
+                    elif isinstance(m, int):
+                        member_ids.append(m)
+            if hasattr(t, "users") and t.users:
+                for u in t.users:
+                    if hasattr(u, "id"):
+                        member_ids.append(u.id)
 
-    # 2. Adicionar o Gestor do Projeto (Project Manager), se existir
+    # 4. Adicionar Gestor do Projeto
     manager_id = getattr(project, "manager_id", None) or getattr(project, "project_manager_id", None)
     if manager_id:
         member_ids.append(manager_id)
 
-    # 3. Filtrar administradores globais (impedem que admins entrem automaticamente no chat geral 
-    # a menos que estejam explicitamente na equipa ou sejam o gestor do projeto)
-    if member_ids:
-        valid_users = db.query(User).filter(User.id.in_(member_ids)).all()
-        filtered_ids = []
-        for u in valid_users:
-            user_role = (getattr(u, "role", "") or "").lower()
-            if user_role == "admin":
-                if u.id == manager_id:
-                    filtered_ids.append(u.id)
-            else:
-                filtered_ids.append(u.id)
-        member_ids = filtered_ids
+    # 5. Adicionar Administradores e Gestores globais com acesso geral
+    admins_managers = db.query(User).filter(
+        func.lower(User.role).in_(["admin", "gestor de operações", "manager"])
+    ).all()
+    for adm in admins_managers:
+        member_ids.append(adm.id)
 
-    return list(set(member_ids))
+    # 6. Limpar duplicados e validar IDs existentes
+    if member_ids:
+        valid_users = db.query(User.id).filter(User.id.in_(member_ids)).all()
+        return [u[0] for u in valid_users]
+
+    return []
 
 @router.get("/rooms")
 def get_user_rooms(
@@ -75,16 +88,28 @@ def get_user_rooms(
     project_id: int = Query(None), 
     db: Session = Depends(get_db)
 ):
-    query = db.query(ChatRoom).join(RoomMember, RoomMember.room_id == ChatRoom.id)\
-        .filter(RoomMember.user_id == user_id)
-        
+    user = db.query(User).filter(User.id == user_id).first()
+    is_admin_or_manager = user and ((user.role or "").lower() in ["admin", "gestor de operações", "manager"])
+
+    query = db.query(ChatRoom)
+
     if context == "project":
         if project_id:
             query = query.filter(ChatRoom.project_id == project_id)
         else:
             query = query.filter(ChatRoom.project_id.isnot(None))
+
+        if not is_admin_or_manager:
+            user_room_ids = db.query(RoomMember.room_id).filter(RoomMember.user_id == user_id).subquery()
+            query = query.filter(
+                or_(
+                    ChatRoom.id.in_(user_room_ids),
+                    ChatRoom.is_general == True
+                )
+            )
     else:
-        query = query.filter(ChatRoom.project_id.is_(None))
+        user_room_ids = db.query(RoomMember.room_id).filter(RoomMember.user_id == user_id).subquery()
+        query = query.filter(ChatRoom.project_id.is_(None)).filter(ChatRoom.id.in_(user_room_ids))
         
     rooms = query.all()
     result = []
@@ -112,8 +137,10 @@ def get_user_rooms(
             .filter(Message.is_read == 0)\
             .scalar()
             
-        members = db.query(User).join(RoomMember, RoomMember.user_id == User.id)\
+        members_query = db.query(User).join(RoomMember, RoomMember.user_id == User.id)\
             .filter(RoomMember.room_id == room.id).all()
+            
+        formatted_members = [{"id": m.id, "name": m.name or m.email, "email": m.email} for m in members_query]
             
         result.append({
             "id": room.id,
@@ -122,7 +149,7 @@ def get_user_rooms(
             "project_id": room.project_id,
             "is_general": room.is_general,
             "parent_id": room.parent_id,
-            "members": [{"id": m.id, "name": m.name or m.email, "email": m.email} for m in members],
+            "members": formatted_members,
             "last_message": last_msg.content if last_msg else "Conversa iniciada",
             "last_time": last_msg.created_at.strftime("%H:%M") if last_msg else "",
             "timestamp": last_msg.created_at if last_msg else datetime.min,
@@ -131,6 +158,7 @@ def get_user_rooms(
         
     result.sort(key=lambda x: x["timestamp"], reverse=True)
     return result
+
 
 @router.post("/projects/{project_id}/sync-general")
 def sync_project_general_room(project_id: int, current_user_id: int, db: Session = Depends(get_db)):
@@ -170,16 +198,21 @@ def sync_project_general_room(project_id: int, current_user_id: int, db: Session
 
 @router.post("/rooms")
 def create_room(room_data: ChatRoomCreate, current_user_id: int = Query(...), db: Session = Depends(get_db)):
+    if not room_data.name or not room_data.name.strip():
+        raise HTTPException(status_code=400, detail="O nome do canal / subchat é obrigatório.")
+
     member_ids = list(set(room_data.member_ids + [current_user_id]))
     
-    # Validação de segurança para subchats de projeto
     if room_data.project_id:
         allowed_project_members = get_project_member_ids(room_data.project_id, db)
+        
         for uid in member_ids:
             if uid not in allowed_project_members:
+                invalid_user = db.query(User).filter(User.id == uid).first()
+                user_label = invalid_user.name or invalid_user.email if invalid_user else f"#{uid}"
                 raise HTTPException(
                     status_code=400,
-                    detail=f"O utilizador #{uid} não pertence às equipas associadas a este projeto."
+                    detail=f"O utilizador {user_label} não pertence às equipas associadas a este projeto."
                 )
 
     if not room_data.force_create and room_data.project_id:
@@ -195,7 +228,7 @@ def create_room(room_data: ChatRoomCreate, current_user_id: int = Query(...), db
                 }
 
     new_room = ChatRoom(
-        name=room_data.name.strip() if room_data.name else None,
+        name=room_data.name.strip(),
         type=room_data.type or "group",
         project_id=room_data.project_id,
         is_general=room_data.is_general or False,
@@ -210,6 +243,67 @@ def create_room(room_data: ChatRoomCreate, current_user_id: int = Query(...), db
     db.commit()
 
     return {"warning": False, "room_id": new_room.id, "name": new_room.name}
+
+@router.post("/rooms/{room_id}/members")
+def add_room_member(
+    room_id: int, 
+    user_id: int = Query(...), 
+    current_user_id: int = Query(...), 
+    db: Session = Depends(get_db)
+):
+    room = db.query(ChatRoom).filter(ChatRoom.id == room_id).first()
+    if not room:
+        raise HTTPException(status_code=404, detail="Sala não encontrada")
+
+    if room.project_id:
+        allowed_members = get_project_member_ids(room.project_id, db)
+        if user_id not in allowed_members:
+            raise HTTPException(
+                status_code=400, 
+                detail="Este utilizador não pertence às equipas associadas a este projeto."
+            )
+
+    existing = db.query(RoomMember).filter(
+        RoomMember.room_id == room_id, 
+        RoomMember.user_id == user_id
+    ).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="O utilizador já é membro deste canal.")
+
+    db.add(RoomMember(room_id=room_id, user_id=user_id))
+    db.commit()
+
+    members = db.query(User).join(RoomMember, RoomMember.user_id == User.id)\
+        .filter(RoomMember.room_id == room_id).all()
+    return [{"id": m.id, "name": m.name or m.email, "email": m.email} for m in members]
+
+@router.delete("/rooms/{room_id}/members/{user_id}")
+def remove_room_member(
+    room_id: int, 
+    user_id: int, 
+    current_user_id: int = Query(...), 
+    db: Session = Depends(get_db)
+):
+    room = db.query(ChatRoom).filter(ChatRoom.id == room_id).first()
+    if not room:
+        raise HTTPException(status_code=404, detail="Sala não encontrada")
+
+    if room.is_general:
+        raise HTTPException(status_code=400, detail="Não é possível remover membros do canal Geral do projeto.")
+
+    member = db.query(RoomMember).filter(
+        RoomMember.room_id == room_id, 
+        RoomMember.user_id == user_id
+    ).first()
+    if not member:
+        raise HTTPException(status_code=404, detail="Membro não encontrado nesta sala.")
+
+    db.delete(member)
+    db.commit()
+
+    members = db.query(User).join(RoomMember, RoomMember.user_id == User.id)\
+        .filter(RoomMember.room_id == room_id).all()
+    return [{"id": m.id, "name": m.name or m.email, "email": m.email} for m in members]
 
 @router.post("/rooms/direct/{other_user_id}")
 def get_or_create_direct_room(other_user_id: int, current_user_id: int, db: Session = Depends(get_db)):
@@ -309,3 +403,21 @@ def summarize_chat(data: dict):
             
     print(f"ERRO CRÍTICO NA IA DO CHAT: {last_error}")
     raise HTTPException(status_code=500, detail="A IA está temporariamente indisponível devido a alta procura. Tenta novamente em segundos.")
+
+
+@router.delete("/rooms/{room_id}")
+def delete_chat_room(
+    room_id: int, 
+    current_user_id: int = Query(...), 
+    db: Session = Depends(get_db)
+):
+    room = db.query(ChatRoom).filter(ChatRoom.id == room_id).first()
+    if not room:
+        raise HTTPException(status_code=404, detail="Canal ou subchat não encontrado.")
+
+    if room.is_general:
+        raise HTTPException(status_code=400, detail="Não é permitido apagar o canal Geral do projeto.")
+
+    db.delete(room)
+    db.commit()
+    return {"success": True, "message": "Subchat apagado com sucesso."}
