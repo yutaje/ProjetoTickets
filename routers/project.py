@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
+from sqlalchemy import or_, text
 from typing import List
 from database import get_db
 from models.project import Project, project_teams
@@ -19,7 +20,6 @@ def sync_project_chat_members(project: Project, db: Session):
     if not project or not project.id:
         return
 
-    # 1. Procura ou cria o canal Geral do Projeto
     general_room = db.query(ChatRoom).filter(
         ChatRoom.project_id == project.id,
         ChatRoom.is_general == True
@@ -39,7 +39,6 @@ def sync_project_chat_members(project: Project, db: Session):
         general_room.name = f"# Geral - {project.name}"
         db.commit()
 
-    # 2. Extrai todos os membros das equipas associadas ao projeto
     all_member_ids = []
     teams = getattr(project, "teams", []) or []
     
@@ -57,14 +56,12 @@ def sync_project_chat_members(project: Project, db: Session):
 
     all_member_ids = list(set(all_member_ids))
 
-    # 3. Sincroniza participantes na tabela room_members (ignorando administradores globais puros)
     if all_member_ids:
         valid_users = db.query(User).filter(User.id.in_(all_member_ids)).all()
         filtered_ids = []
         for u in valid_users:
             user_role = (getattr(u, "role", "") or "").lower()
             if user_role == "admin":
-                # Só inclui o admin se ele tiver ligação direta (ou se for necessário)
                 pass
             else:
                 filtered_ids.append(u.id)
@@ -88,19 +85,13 @@ def calculate_project_progress(project: Project, db: Session):
     if not tickets:
         return 0.0, 0.0, 0.0
 
-    # 1. Soma total das horas estimadas de todas as tarefas do projeto
     total_est_hours = sum(t.estimated_hours or 0.0 for t in tickets)
-    
-    # 2. Soma das horas reais gastas
     total_tracked_hours = sum(t.tracked_hours or 0.0 for t in tickets)
-
-    # 3. Soma as horas estimadas APENAS das tarefas concluídas ("Done")
     completed_est_hours = sum(
         (t.estimated_hours or 0.0) for t in tickets 
         if t.status and t.status.lower() in ["done", "concluído", "concluido"]
     )
 
-    # 4. Calcula a percentagem baseada no peso das horas estimadas das tarefas concluídas face ao total estimado
     if total_est_hours > 0:
         progress = round((completed_est_hours / total_est_hours) * 100, 1)
     else:
@@ -115,30 +106,19 @@ def get_projects(db: Session = Depends(get_db), current_user: User = Depends(get
     
     if role in ["admin", "manager", "gestor de operações", "gestor de projeto", "gestor de projetos"]:
         projects = db.query(Project).all()
-    elif "líder de equipa" in role or "lider de equipa" in role:
-        led_teams = db.query(Team).filter(
-            (getattr(Team, "leader_id", None) == current_user.id) |
-            (getattr(Team, "manager_id", None) == current_user.id)
-        ).all()
-        led_team_ids = [t.id for t in led_teams]
-        
-        team_member_ids = []
-        for t in led_teams:
-            if hasattr(t, "members"):
-                team_member_ids.extend([m.id for m in t.members])
-            if hasattr(t, "users"):
-                team_member_ids.extend([u.id for u in t.users])
-                
-        projects = db.query(Project).filter(
-            (Project.teams.any(Team.id.in_(led_team_ids))) |
-            (Project.tickets.any(Ticket.team_id.in_(led_team_ids))) |
-            (Project.tickets.any(Ticket.assigned_to_id.in_(team_member_ids)))
-        ).distinct().all()
     else:
-        user_team_ids = [t.id for t in getattr(current_user, "teams", [])] if hasattr(current_user, "teams") else []
+        team_res = db.execute(text("SELECT team_id FROM team_members WHERE user_id = :uid"), {"uid": current_user.id}).fetchall()
+        user_team_ids = [row[0] for row in team_res]
+
         projects = db.query(Project).filter(
-            (Project.teams.any(Team.id.in_(user_team_ids))) |
-            (Project.tickets.any((Ticket.assigned_to_id == current_user.id) | (Ticket.creator_id == current_user.id)))
+            or_(
+                Project.team_id.in_(user_team_ids) if user_team_ids else False,
+                Project.id.in_(
+                    db.query(project_teams.c.project_id).filter(project_teams.c.team_id.in_(user_team_ids))
+                ) if user_team_ids else False,
+                Project.tickets.any(Ticket.assigned_to_id == current_user.id),
+                Project.tickets.any(Ticket.team_id.in_(user_team_ids)) if user_team_ids else False
+            )
         ).distinct().all()
 
     results = []
@@ -152,6 +132,7 @@ def get_projects(db: Session = Depends(get_db), current_user: User = Depends(get
             description=proj.description,
             client_id=proj.client_id,
             due_date=getattr(proj, "due_date", None),
+            is_archived=getattr(proj, "is_archived", False),
             teams=[{"id": t.id, "name": t.name} for t in proj_teams],
             team_ids=[t.id for t in proj_teams],
             progress_percentage=progress,
@@ -175,7 +156,8 @@ def create_project(
         name=project.name,
         description=project.description,
         client_id=project.client_id,
-        due_date=project.due_date
+        due_date=project.due_date,
+        is_archived=False
     )
 
     target_team_ids = list(project.team_ids or [])
@@ -196,7 +178,6 @@ def create_project(
         )
         db.commit()
 
-    # Criação e sincronização automática do chat geral com as equipas do projeto
     sync_project_chat_members(db_project, db)
 
     progress, total_h, tracked_h = calculate_project_progress(db_project, db)
@@ -208,12 +189,34 @@ def create_project(
         description=db_project.description,
         client_id=db_project.client_id,
         due_date=getattr(db_project, "due_date", None),
+        is_archived=db_project.is_archived,
         teams=[{"id": t.id, "name": t.name} for t in proj_teams],
         team_ids=[t.id for t in proj_teams],
         progress_percentage=progress,
         total_estimated_hours=total_h,
         completed_estimated_hours=tracked_h
     )
+
+@router.put("/{project_id}/archive", response_model=dict)
+def archive_project(
+    project_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    role = getattr(current_user, "role", "Member").lower()
+    if role not in ["admin", "manager", "gestor de operações", "gestor de projeto", "gestor de projetos"]:
+        raise HTTPException(status_code=403, detail="Não tens permissões para arquivar este projeto.")
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Projeto não encontrado.")
+    
+    project.is_archived = not getattr(project, "is_archived", False)
+    db.commit()
+    db.refresh(project)
+    
+    status_text = "arquivado" if project.is_archived else "restaurado"
+    return {"success": True, "message": f"Projeto {status_text} com sucesso.", "is_archived": project.is_archived}
 
 @router.put("/{project_id}", response_model=ProjectResponse)
 def update_project(
@@ -262,7 +265,6 @@ def update_project(
     db.commit()
     db.refresh(db_proj)
 
-    # Sincroniza participantes do chat geral após atualização das equipas ou nome do projeto
     sync_project_chat_members(db_proj, db)
 
     progress, total_h, tracked_h = calculate_project_progress(db_proj, db)
@@ -274,6 +276,7 @@ def update_project(
         description=db_proj.description,
         client_id=db_proj.client_id,
         due_date=getattr(db_proj, "due_date", None),
+        is_archived=db_proj.is_archived,
         teams=[{"id": t.id, "name": t.name} for t in proj_teams],
         team_ids=[t.id for t in proj_teams],
         progress_percentage=progress,
@@ -299,7 +302,6 @@ def delete_project(
         {"project_id": None}, synchronize_session=False
     )
     
-    # 🔒 Limpeza segura e em cascata das salas de chat do projeto para evitar IntegrityError
     project_rooms = db.query(ChatRoom).filter(ChatRoom.project_id == project_id).all()
     room_ids = [room.id for room in project_rooms]
 

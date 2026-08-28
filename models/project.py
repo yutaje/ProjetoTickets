@@ -1,4 +1,4 @@
-from sqlalchemy import Column, ForeignKey, Integer, String, Text, Date, Table
+from sqlalchemy import Column, ForeignKey, Integer, String, Text, Date, Table, Boolean
 from sqlalchemy.orm import relationship
 from database import Base
 
@@ -20,6 +20,9 @@ class Project(Base):
     client_id = Column(Integer, ForeignKey("clients.id", ondelete="SET NULL"), nullable=True)
     manager_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     due_date = Column(Date, nullable=True)
+    
+    # Campo para indicar se o projeto foi arquivado/terminado
+    is_archived = Column(Boolean, default=False)
 
     # Relações
     teams = relationship("Team", secondary=project_teams, backref="projects")

@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Form, UploadFile, File
 import os
 from sqlalchemy.orm import Session
-from sqlalchemy import or_
+from sqlalchemy import or_, text
 from database import get_db
 from models.ticket import Ticket, SubTask
 from models.user import User
@@ -27,6 +27,7 @@ import io
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 from pydantic import BaseModel
+from models.project import Project, project_teams
 
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
@@ -66,6 +67,14 @@ def filter_tickets_by_permissions(query, current_user: User, db: Session):
     if role in ["admin", "manager", "gestor de operações", "gestor de projeto", "gestor de projetos"]:
         return query
 
+    # Descobre as equipas a que o utilizador pertence
+    team_res = db.execute(text("SELECT team_id FROM team_members WHERE user_id = :uid"), {"uid": current_user.id}).fetchall()
+    user_team_ids = [row[0] for row in team_res]
+
+    # Descobre os IDs de todos os projetos associados a essas equipas através da tabela project_teams
+    project_ids_query = db.query(project_teams.c.project_id).filter(project_teams.c.team_id.in_(user_team_ids)) if user_team_ids else []
+    user_project_ids = [row[0] for row in project_ids_query] if user_team_ids else []
+
     led_teams = db.query(Team).filter(
         (getattr(Team, "leader_id", None) == current_user.id) |
         (getattr(Team, "manager_id", None) == current_user.id)
@@ -85,6 +94,18 @@ def filter_tickets_by_permissions(query, current_user: User, db: Session):
         Ticket.creator_id == current_user.id,
         SubTask.assigned_to_id == current_user.id
     ]
+
+    if user_team_ids:
+        conditions.append(Ticket.team_id.in_(user_team_ids))
+
+    if user_project_ids:
+        conditions.append(Ticket.project_id.in_(user_project_ids))
+
+    # 🔥 INCLUI TAMBÉM AS TAREFAS QUE ESTÃO LIVRES (SEM DONO) NOS PROJETOS DA EQUIPA
+    if user_project_ids:
+        conditions.append(
+            (Ticket.project_id.in_(user_project_ids)) & (Ticket.assigned_to_id == None)
+        )
 
     if "líder de equipa" in role or "lider de equipa" in role or led_team_ids:
         if led_team_ids:
@@ -212,13 +233,29 @@ def get_project_tickets(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    project = db.query(Project).filter(Project.id == project_id).first()
-    if not project:
-        raise HTTPException(status_code=404, detail="Projeto não encontrado.")
+    role = getattr(current_user, "role", "Member").lower()
     
-    query = db.query(Ticket).filter(Ticket.project_id == project_id)
-    query = filter_tickets_by_permissions(query, current_user, db)
-    return query.all()
+    if role in ["admin", "manager", "gestor de operações", "gestor de projeto", "gestor de projetos"]:
+        return db.query(Ticket).filter(Ticket.project_id == project_id).all()
+
+    team_res = db.execute(text("SELECT team_id FROM team_members WHERE user_id = :uid"), {"uid": current_user.id}).fetchall()
+    user_team_ids = [row[0] for row in team_res]
+
+    project = db.query(Project).filter(Project.id == project_id).filter(
+        or_(
+            Project.team_id.in_(user_team_ids) if user_team_ids else False,
+            Project.id.in_(
+                db.query(project_teams.c.project_id).filter(project_teams.c.team_id.in_(user_team_ids))
+            ) if user_team_ids else False,
+            Project.tickets.any(Ticket.assigned_to_id == current_user.id),
+            Project.tickets.any(Ticket.team_id.in_(user_team_ids)) if user_team_ids else False
+        )
+    ).first()
+
+    if not project:
+        raise HTTPException(status_code=403, detail="Não tens acesso a este projeto ou ele não existe.")
+    
+    return db.query(Ticket).filter(Ticket.project_id == project_id).all()
 
 @router.post("/", response_model=TicketResponse, status_code=status.HTTP_201_CREATED)
 def create_ticket(
@@ -450,7 +487,6 @@ def update_ticket(
                 detail=f"⚠️ Esta tarefa depende da conclusão da tarefa #{prereq.id} ('{prereq.title}') e ainda não pode ser iniciada."
             )
 
-    # 🕒 Lógica automática: Se mudar para Revisão ou Concluído e estiver a correr, desliga o is_running
     if target_status and target_status != old_status:
         if target_status.lower() in ['in review', 'em revisão', 'em revisao', 'done', 'concluído', 'concluido'] and ticket.is_running:
             ticket.is_running = False
@@ -642,10 +678,6 @@ def get_ai_focus_recommendation(
         top_task = scored_tasks[0]
         return {"recommendation": f"Análise Operacional Automática: Deves focar-te na tarefa #{top_task['id']} ('{top_task['title']}') devido ao cruzamento da sua prioridade ({top_task['priority']}) com o prazo ({top_task['due_date']})."}
 
-# ==========================================
-# GESTÃO DE CRONÓMETRO E CONCLUSÃO DE TAREFA
-# ==========================================
-
 @router.post("/{ticket_id}/start-timer", response_model=TicketResponse)
 def start_timer(
     ticket_id: int,
@@ -710,7 +742,6 @@ def stop_timer(
 
     if session_hours > 0.0001:
         current_status = (ticket.status or "").lower()
-        # 🔄 Se estiver em revisão, guarda o tempo em 'review_tracked_hours' separado do trabalho principal
         if current_status in ["in review", "em revisão", "em revisao"]:
             ticket.review_tracked_hours = (ticket.review_tracked_hours or 0.0) + session_hours
         else:

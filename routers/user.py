@@ -6,7 +6,7 @@ from schemas.user import UserCreate, UserUpdate, UserResponse
 from passlib.context import CryptContext
 from routers.auth import get_current_user  
 
-#config das encriptações das pass
+# config das encriptações das pass
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 router = APIRouter(
@@ -57,10 +57,20 @@ def update_user(
     if not db_user:
         raise HTTPException(status_code=404, detail="Utilizador não encontrado.")
     
-    # Utilizar model_dump para Pydantic v2 (evita problemas com campos opcionais como o role)
     update_data = user_update.model_dump(exclude_unset=True)
     
+    # Se houver tentativa de alterar a password
     if "password" in update_data and update_data["password"]:
+        # Se for o próprio utilizador a alterar, exigimos a confirmação da password atual
+        # (podes adaptar caso o UserUpdate inclua um campo current_password)
+        current_password = update_data.pop("current_password", None)
+        
+        if current_user.id == user_id:
+            if not current_password:
+                raise HTTPException(status_code=400, detail="Tens de indicar a palavra-passe atual para definir uma nova.")
+            if not pwd_context.verify(current_password, db_user.hashed_password):
+                raise HTTPException(status_code=400, detail="A palavra-passe atual está incorreta.")
+
         hashed_password = pwd_context.hash(update_data["password"])
         update_data["hashed_password"] = hashed_password
         del update_data["password"]
