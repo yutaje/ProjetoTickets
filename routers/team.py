@@ -9,6 +9,7 @@ from models.chat import ChatRoom, RoomMember
 from schemas.team import TeamCreate, TeamResponse, TeamUpdate
 from core.security import require_manager_or_admin, get_current_user
 from typing import List
+from routers.project import sync_project_chat_members  # <-- Importado para sincronizar o chat geral
 
 router = APIRouter(
     prefix="/teams",
@@ -16,10 +17,6 @@ router = APIRouter(
 )
 
 def sync_team_removal_from_project_chats(team_id: int, remaining_member_ids: list, db: Session):
-    """
-    Remove utilizadores de TODAS as salas de chat (Gerais e Subchats) dos projetos 
-    ligados a esta equipa caso deixem de pertencer a qualquer equipa do projeto.
-    """
     projects = db.query(Project).filter(
         (Project.teams.any(Team.id == team_id)) |
         (Project.team_id == team_id)
@@ -29,7 +26,6 @@ def sync_team_removal_from_project_chats(team_id: int, remaining_member_ids: lis
         allowed_user_ids = set()
         teams = getattr(proj, "teams", []) or []
         
-        # Se for modelo legado com team_id único
         if not teams and getattr(proj, "team_id", None):
             t_obj = db.query(Team).filter(Team.id == proj.team_id).first()
             if t_obj:
@@ -45,7 +41,6 @@ def sync_team_removal_from_project_chats(team_id: int, remaining_member_ids: lis
                 if hasattr(t, "members"): allowed_user_ids.update([m.id for m in t.members if hasattr(m, "id")])
                 if hasattr(t, "users"): allowed_user_ids.update([u.id for u in t.users if hasattr(u, "id")])
 
-        # Remove utilizadores sem permissão de todas as salas deste projeto
         project_rooms = db.query(ChatRoom).filter(ChatRoom.project_id == proj.id).all()
         for room in project_rooms:
             db.query(RoomMember).filter(
@@ -145,6 +140,14 @@ def update_team(
         db=db
     )
 
+    # NOVO: Atualiza e sincroniza também os chats gerais dos projetos associados a esta equipa para meter lá os novos membros
+    affected_projects = db.query(Project).filter(
+        (Project.teams.any(Team.id == team_id)) |
+        (Project.team_id == team_id)
+    ).all()
+    for proj in affected_projects:
+        sync_project_chat_members(proj, db)
+
     new_member_ids = {m.id for m in team.members}
     added_member_ids = new_member_ids - old_member_ids
 
@@ -170,7 +173,6 @@ def delete_team(
     if not team:
         raise HTTPException(status_code=404, detail="Equipa não encontrada")
     
-    # Remove membros desta equipa de todos os chats dos projetos antes de apagar
     sync_team_removal_from_project_chats(
         team_id=team_id,
         remaining_member_ids=[],

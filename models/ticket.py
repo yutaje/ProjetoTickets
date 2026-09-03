@@ -55,6 +55,9 @@ class Ticket(Base):
     # Motivo de devolução da tarefa ("divórcio")
     return_reason = Column(String(500), nullable=True)
 
+    # 🆕 Campo para ocultar das listas ativas mantendo na Base de Conhecimento
+    is_hidden_from_active = Column(Boolean, default=False)
+
     # Relações essenciais
     project = relationship("Project", back_populates="tickets")
     assignee = relationship("User", foreign_keys=[assigned_to_id])

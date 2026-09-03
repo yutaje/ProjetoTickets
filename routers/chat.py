@@ -100,16 +100,21 @@ def get_user_rooms(
             query = query.filter(ChatRoom.project_id.isnot(None))
 
         if not is_admin_or_manager:
-            user_room_ids = db.query(RoomMember.room_id).filter(RoomMember.user_id == user_id).subquery()
+            # Correção do warning convertendo os IDs de salas do utilizador para uma lista Python
+            user_room_ids = [r[0] for r in db.query(RoomMember.room_id).filter(RoomMember.user_id == user_id).all()]
             query = query.filter(
                 or_(
-                    ChatRoom.id.in_(user_room_ids),
+                    ChatRoom.id.in_(user_room_ids) if user_room_ids else False,
                     ChatRoom.is_general == True
                 )
             )
     else:
-        user_room_ids = db.query(RoomMember.room_id).filter(RoomMember.user_id == user_id).subquery()
-        query = query.filter(ChatRoom.project_id.is_(None)).filter(ChatRoom.id.in_(user_room_ids))
+        user_room_ids = [r[0] for r in db.query(RoomMember.room_id).filter(RoomMember.user_id == user_id).all()]
+        query = query.filter(ChatRoom.project_id.is_(None))
+        if user_room_ids:
+            query = query.filter(ChatRoom.id.in_(user_room_ids))
+        else:
+            query = query.filter(ChatRoom.id == -1)
         
     rooms = query.all()
     result = []
@@ -360,10 +365,14 @@ async def chat_websocket(websocket: WebSocket, room_id: int, user_id: int, db: S
 
 @router.get("/unread-count")
 def get_unread_count(user_id: int, db: Session = Depends(get_db)):
-    user_rooms = db.query(RoomMember.room_id).filter(RoomMember.user_id == user_id).subquery()
+    # Correção do warning convertendo os IDs de salas do utilizador para uma lista Python
+    user_room_ids = [r[0] for r in db.query(RoomMember.room_id).filter(RoomMember.user_id == user_id).all()]
     
+    if not user_room_ids:
+        return {"unread_count": 0}
+
     unread = db.query(func.count(Message.id))\
-        .filter(Message.room_id.in_(user_rooms))\
+        .filter(Message.room_id.in_(user_room_ids))\
         .filter(Message.sender_id != user_id)\
         .filter(Message.is_read == 0)\
         .scalar()
@@ -403,7 +412,6 @@ def summarize_chat(data: dict):
             
     print(f"ERRO CRÍTICO NA IA DO CHAT: {last_error}")
     raise HTTPException(status_code=500, detail="A IA está temporariamente indisponível devido a alta procura. Tenta novamente em segundos.")
-
 
 @router.delete("/rooms/{room_id}")
 def delete_chat_room(

@@ -67,11 +67,9 @@ def filter_tickets_by_permissions(query, current_user: User, db: Session):
     if role in ["admin", "manager", "gestor de operações", "gestor de projeto", "gestor de projetos"]:
         return query
 
-    # Descobre as equipas a que o utilizador pertence
     team_res = db.execute(text("SELECT team_id FROM team_members WHERE user_id = :uid"), {"uid": current_user.id}).fetchall()
     user_team_ids = [row[0] for row in team_res]
 
-    # Descobre os IDs de todos os projetos associados a essas equipas através da tabela project_teams
     project_ids_query = db.query(project_teams.c.project_id).filter(project_teams.c.team_id.in_(user_team_ids)) if user_team_ids else []
     user_project_ids = [row[0] for row in project_ids_query] if user_team_ids else []
 
@@ -101,7 +99,6 @@ def filter_tickets_by_permissions(query, current_user: User, db: Session):
     if user_project_ids:
         conditions.append(Ticket.project_id.in_(user_project_ids))
 
-    # 🔥 INCLUI TAMBÉM AS TAREFAS QUE ESTÃO LIVRES (SEM DONO) NOS PROJETOS DA EQUIPA
     if user_project_ids:
         conditions.append(
             (Ticket.project_id.in_(user_project_ids)) & (Ticket.assigned_to_id == None)
@@ -122,7 +119,7 @@ def get_my_stats(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    query = db.query(Ticket)
+    query = db.query(Ticket).filter(Ticket.is_hidden_from_active == False)
     query = filter_tickets_by_permissions(query, current_user, db)
     
     all_tickets = query.all()
@@ -162,7 +159,7 @@ def get_active_tickets(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    query = db.query(Ticket).filter(Ticket.is_running == True)
+    query = db.query(Ticket).filter(Ticket.is_running == True, Ticket.is_hidden_from_active == False)
     query = filter_tickets_by_permissions(query, current_user, db)
     return query.all()
 
@@ -236,7 +233,7 @@ def get_project_tickets(
     role = getattr(current_user, "role", "Member").lower()
     
     if role in ["admin", "manager", "gestor de operações", "gestor de projeto", "gestor de projetos"]:
-        return db.query(Ticket).filter(Ticket.project_id == project_id).all()
+        return db.query(Ticket).filter(Ticket.project_id == project_id, Ticket.is_hidden_from_active == False).all()
 
     team_res = db.execute(text("SELECT team_id FROM team_members WHERE user_id = :uid"), {"uid": current_user.id}).fetchall()
     user_team_ids = [row[0] for row in team_res]
@@ -255,7 +252,7 @@ def get_project_tickets(
     if not project:
         raise HTTPException(status_code=403, detail="Não tens acesso a este projeto ou ele não existe.")
     
-    return db.query(Ticket).filter(Ticket.project_id == project_id).all()
+    return db.query(Ticket).filter(Ticket.project_id == project_id, Ticket.is_hidden_from_active == False).all()
 
 @router.post("/", response_model=TicketResponse, status_code=status.HTTP_201_CREATED)
 def create_ticket(
@@ -337,7 +334,7 @@ def get_tickets(
     current_user: User = Depends(get_current_user)
 ):
     check_and_create_deadline_notifications(current_user, db)
-    query = db.query(Ticket)
+    query = db.query(Ticket).filter(Ticket.is_hidden_from_active == False)
     query = filter_tickets_by_permissions(query, current_user, db)
     
     if search:
@@ -345,6 +342,31 @@ def get_tickets(
     if status: 
         query = query.filter(Ticket.status == status)
         
+    return query.all()
+
+@router.put("/{ticket_id}/hide-active")
+def hide_ticket_from_active(ticket_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Tarefa não encontrada")
+    
+    ticket.is_hidden_from_active = True 
+    db.commit()
+    return {"success": True}
+
+@router.get("/knowledge-base/list", response_model=List[TicketResponse])
+def get_knowledge_base_tickets(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    query = db.query(Ticket).filter(
+        or_(
+            Ticket.status.ilike("done"),
+            Ticket.status.ilike("concluído"),
+            Ticket.status.ilike("concluido")
+        )
+    )
+    query = filter_tickets_by_permissions(query, current_user, db)
     return query.all()
 
 @router.get("/my-day/today")
@@ -585,7 +607,7 @@ def generate_ai_report(
 
     try:
         response = client.models.generate_content(
-            model='gemini-flash-latest',
+            model='gemini-2.0-flash',
             contents=prompt,
         )
         return {"generated_report": response.text}
@@ -604,7 +626,7 @@ def get_ai_focus_recommendation(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    query = db.query(Ticket)
+    query = db.query(Ticket).filter(Ticket.is_hidden_from_active == False)
     query = filter_tickets_by_permissions(query, current_user, db)
     active_tickets = query.filter(Ticket.status != "Done").all()
     
@@ -817,7 +839,7 @@ def check_and_create_deadline_notifications(user: User, db: Session):
         today_str = today.isoformat()
         current_hour = datetime.now().hour
         
-        query = db.query(Ticket)
+        query = db.query(Ticket).filter(Ticket.is_hidden_from_active == False)
         query = filter_tickets_by_permissions(query, user, db)
         tickets = query.filter(Ticket.status != "Done").all()
         
