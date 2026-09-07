@@ -27,7 +27,7 @@ class Ticket(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     title = Column(String(255), nullable=False)
-    description = Column(String(1000), nullable=False) # Obrigatório segundo o caderno de encargos
+    description = Column(String(6000), nullable=True) # Atualizado para suportar até 6000+ caracteres e opcional
     priority = Column(String(50), default="Média")
     status = Column(String(50), default="To Do")
     

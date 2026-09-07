@@ -260,20 +260,13 @@ def create_ticket(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    if not ticket.description or ticket.description.strip() == "":
-        raise HTTPException(status_code=400, detail="A descrição da tarefa é um campo obrigatório.")
+    # Horas estimadas já não são obrigatórias (assume 0.0 se venham vazias)
+    est_hours = ticket.estimated_hours if ticket.estimated_hours is not None else 0.0
 
-    if not ticket.estimated_hours or ticket.estimated_hours <= 0:
-        raise HTTPException(status_code=400, detail="As horas estimadas são obrigatórias e devem ser superiores a 0.")
-
-    role = getattr(current_user, "role", "Member").lower()
-    
-    if role in ["user", "member", "técnico"]:
-        assigned_id = current_user.id
-        proj_id = None
-    else:
-        assigned_id = ticket.assigned_to_id
-        proj_id = ticket.project_id if ticket.project_id else None
+    # Todos os cargos podem definir livremente o responsável e a equipa atribuída
+    assigned_id = ticket.assigned_to_id if ticket.assigned_to_id else None
+    team_assigned_id = getattr(ticket, 'team_id', None)
+    proj_id = ticket.project_id if ticket.project_id else None
 
     blocked_id = getattr(ticket, 'blocked_by_id', None)
     if blocked_id:
@@ -297,13 +290,14 @@ def create_ticket(
 
     db_ticket = Ticket(
         title=ticket.title,
-        description=ticket.description,
+        description=ticket.description or "",
         priority=ticket.priority,
         status=ticket.status,
         project_id=proj_id,
         client_id=ticket.client_id,
         assigned_to_id=assigned_id,
-        estimated_hours=ticket.estimated_hours,
+        team_id=team_assigned_id,
+        estimated_hours=est_hours,
         due_date=d_date,
         start_date=s_date,
         blocked_by_id=blocked_id,
@@ -490,8 +484,8 @@ def update_ticket(
             )
 
     update_data = ticket_data.dict(exclude_unset=True)
-    if "description" in update_data and (not update_data["description"] or update_data["description"].strip() == ""):
-        raise HTTPException(status_code=400, detail="A descrição da tarefa não pode estar vazia.")
+    if "description" in update_data and update_data["description"] is None:
+        update_data["description"] = ""
 
     old_status = ticket.status
     old_priority = ticket.priority
@@ -1503,7 +1497,7 @@ def update_subtask(subtask_id: int, data: dict, db: Session = Depends(get_db), c
 
 @router.delete("/subtasks/{subtask_id}", status_code=204)
 def delete_subtask(subtask_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    sub = db.query(SubTask).filter(SubTask.id == subtask_id).first()
+    sub = db.query(SubTask).filter(SubTask.id == subtask_id).form() if hasattr(db.query(SubTask).filter(SubTask.id == subtask_id), 'form') else db.query(SubTask).filter(SubTask.id == subtask_id).first()
     if not sub:
         raise HTTPException(status_code=404, detail="Subtarefa não encontrada.")
         
@@ -1672,8 +1666,11 @@ def grab_team_task(
     
     db.commit()
     db.refresh(ticket)
-    log_action(db, current_user.id, "Agarrar Tarefa de Equipa", f"Puxou para si a tarefa #{ticket.id} - {ticket.title}", ticket_id=ticket.id)
+    log_action(db, current_user.id, "Agarrar Tarefa de Equipa", f"Puxou para si a tarefa #{ticket.id} - {db_ticket_title_fallback(ticket)}", ticket_id=ticket.id)
     return ticket
+
+def db_ticket_title_fallback(t):
+    return getattr(t, 'title', '')
 
 @router.get("/{ticket_id}/audit-logs")
 def get_ticket_audit_logs(
@@ -1687,7 +1684,7 @@ def get_ticket_audit_logs(
     if not ticket:
         raise HTTPException(status_code=404, detail="Tarefa não encontrada.")
         
-    query = db.query(AuditLog).filter(AuditLog.ticket_id == ticket_id)
+    query = db.query(AuditLog).filter(AuditLog.audit_id == ticket_id) if hasattr(AuditLog, 'audit_id') else db.query(AuditLog).filter(AuditLog.ticket_id == ticket_id)
     
     if start_date:
         query = query.filter(AuditLog.created_at >= datetime.combine(start_date, datetime.min.time()))
