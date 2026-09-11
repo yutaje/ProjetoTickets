@@ -4,7 +4,7 @@ from database import get_db
 from models.audit_log import AuditLog
 from models.ticket import Ticket
 from models.user import User
-from core.security import get_current_user
+from core.security import get_current_user, check_permission, verify_dynamic_permission
 
 router = APIRouter(
     prefix="/audit-logs",
@@ -16,18 +16,13 @@ def get_audit_logs(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    role = getattr(current_user, "role", "Member").lower()
     query = db.query(AuditLog)
     
-    if role in ["member", "programador", "técnico"]:
+    # Valida dinamicamente se tem permissões globais de visualização/gestão (ex: aprovar relatórios ou apagar)
+    has_global_access = verify_dynamic_permission(db, current_user, "can_approve_reports") or verify_dynamic_permission(db, current_user, "can_delete_records")
+    
+    if not has_global_access:
         query = query.filter(AuditLog.user_id == current_user.id)
-    elif role in ["coordenador de equipa", "manager"]:
-        pass
-    elif role == "admin":
-        pass 
-    else:
-        if role != "admin":
-            query = query.filter(AuditLog.user_id == current_user.id)
 
     logs = query.order_by(AuditLog.created_at.desc()).limit(100).all()
     

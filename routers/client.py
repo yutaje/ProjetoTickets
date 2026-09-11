@@ -5,7 +5,7 @@ from models.client import Client
 from models.project import Project
 from models.user import User
 from schemas.client import ClientCreate, ClientUpdate, ClientResponse
-from core.security import get_current_user
+from core.security import get_current_user, check_permission
 
 router = APIRouter(
     prefix="/clients",
@@ -33,7 +33,7 @@ def get_clients(db: Session = Depends(get_db), current_user: User = Depends(get_
 def create_client(
     client_data: ClientCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(check_permission("can_create_tasks"))
 ):
     if not client_data.name or not client_data.name.strip():
         raise HTTPException(status_code=400, detail="O nome do cliente é obrigatório.")
@@ -73,15 +73,8 @@ def update_client(
     client_id: int,
     client_update: ClientUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(check_permission("can_create_tasks"))
 ):
-    role = getattr(current_user, "role", "Member").lower()
-    if role not in ["admin", "manager", "gestor de operações", "gestor de projeto", "gestor de projetos"]:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Apenas Admins e Managers podem editar clientes."
-        )
-    
     db_client = db.query(Client).filter(Client.id == client_id).first()
     if not db_client:
         raise HTTPException(status_code=404, detail="Cliente não encontrado.")
@@ -125,15 +118,8 @@ def update_client(
 def delete_client(
     client_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(check_permission("can_delete_records"))
 ):
-    role = getattr(current_user, "role", "Member").lower()
-    if role not in ["admin", "manager", "gestor de operações"]:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Apenas Admins e Managers podem apagar clientes."
-        )
-    
     db_client = db.query(Client).filter(Client.id == client_id).first()
     if not db_client:
         raise HTTPException(status_code=404, detail="Cliente não encontrado.")

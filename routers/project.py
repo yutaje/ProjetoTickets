@@ -9,7 +9,7 @@ from models.team import Team
 from models.user import User
 from models.chat import ChatRoom, RoomMember, Message
 from schemas.project import ProjectCreate, ProjectUpdate, ProjectResponse
-from core.security import get_current_user
+from core.security import get_current_user, check_permission
 
 router = APIRouter(
     prefix="/projects",
@@ -146,12 +146,8 @@ def get_projects(db: Session = Depends(get_db), current_user: User = Depends(get
 def create_project(
     project: ProjectCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(check_permission("can_create_tasks"))
 ):
-    role = getattr(current_user, "role", "Member").lower()
-    if role not in ["admin", "manager", "gestor de operações", "gestor de projeto", "gestor de projetos"]:
-        raise HTTPException(status_code=403, detail="Apenas Gestores de Projeto ou Administradores podem criar projetos.")
-
     db_project = Project(
         name=project.name,
         description=project.description,
@@ -201,12 +197,8 @@ def create_project(
 def archive_project(
     project_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(check_permission("can_create_tasks"))
 ):
-    role = getattr(current_user, "role", "Member").lower()
-    if role not in ["admin", "manager", "gestor de operações", "gestor de projeto", "gestor de projetos"]:
-        raise HTTPException(status_code=403, detail="Não tens permissões para arquivar este projeto.")
-
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Projeto não encontrado.")
@@ -223,15 +215,11 @@ def update_project(
     project_id: int, 
     project_update: ProjectUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(check_permission("can_create_tasks"))
 ):
-    role = getattr(current_user, "role", "Member").lower()
     db_proj = db.query(Project).filter(Project.id == project_id).first()
     if not db_proj:
         raise HTTPException(status_code=404, detail="Projeto não encontrado")
-
-    if role not in ["admin", "manager", "gestor de operações", "gestor de projeto", "gestor de projetos"]:
-        raise HTTPException(status_code=403, detail="Acesso negado para editar este projeto.")
     
     if project_update.name is not None:
         db_proj.name = project_update.name
@@ -288,12 +276,8 @@ def update_project(
 def delete_project(
     project_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(check_permission("can_delete_records"))
 ):
-    role = getattr(current_user, "role", "Member").lower()
-    if role not in ["admin", "manager", "gestor de operações"]:
-        raise HTTPException(status_code=403, detail="Apenas Administradores podem apagar projetos.")
-
     db_proj = db.query(Project).filter(Project.id == project_id).first()
     if not db_proj:
         raise HTTPException(status_code=404, detail="Projeto não encontrado")

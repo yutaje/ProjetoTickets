@@ -20,11 +20,12 @@ from models.notification import Notification
 from models.typology import Typology
 import models.feedback  # 🆕 Importa os modelos de Feedback para criação automática das tabelas
 from schemas.user import UserResponse 
-from routers import audit, notification, report, user, project, ticket, auth, team, client, chat, feedback  # 🆕 Importa o router de feedback
+from routers import audit, notification, report, user, project, ticket, auth, team, client, chat, feedback  
 from datetime import datetime, date, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi.responses import StreamingResponse
 import io
+from routers import permissions
 
 Base.metadata.create_all(bind=engine)
 
@@ -162,7 +163,8 @@ app.include_router(report.router)
 app.include_router(audit.router)
 app.include_router(client.router)  
 app.include_router(chat.router)
-app.include_router(feedback.router)  # 🆕 Registo do router de Feedback
+app.include_router(feedback.router)
+app.include_router(permissions.router)
 
 @app.get("/")
 def home():

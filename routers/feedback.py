@@ -7,7 +7,7 @@ from models.ticket import Ticket
 from models.project import Project
 from models.notification import Notification
 from schemas.feedback import FeedbackRequestCreate, FeedbackResponseCreate, FeedbackRequestOut, FeedbackResponseOut
-from core.security import get_current_user
+from core.security import get_current_user, check_permission
 from typing import List
 from datetime import datetime, timedelta
 
@@ -16,17 +16,12 @@ router = APIRouter(
     tags=["Feedback"]
 )
 
-# 1. Criar Pedido de Feedback (Atribui estritamente ao responsável pela tarefa e exclui o gestor)
 @router.post("/requests", status_code=status.HTTP_201_CREATED)
 def create_feedback_request(
     data: FeedbackRequestCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(check_permission("can_approve_reports"))
 ):
-    role = getattr(current_user, "role", "Member").lower()
-    if role not in ["admin", "manager", "gestor de operações"]:
-        raise HTTPException(status_code=403, detail="Apenas gestores podem solicitar pedidos de feedback.")
-
     target_users = data.target_user_ids or []
     if data.ticket_id:
         ticket = db.query(Ticket).filter(Ticket.id == data.ticket_id).first()
@@ -51,7 +46,6 @@ def create_feedback_request(
     db.commit()
     db.refresh(req)
 
-    # 🕒 Ajusta o fuso horário para a notificação ficar com a hora correta (compensando o UTC)
     local_deadline = data.deadline + timedelta(hours=1) if data.deadline else data.deadline
     deadline_str = local_deadline.strftime("%d/%m/%Y às %H:%M") if local_deadline else ""
     
@@ -64,7 +58,6 @@ def create_feedback_request(
     db.commit()
     return {"message": "Pedido de feedback criado com sucesso!", "id": req.id}
 
-# 2. Listar Pedidos de Feedback Pendentes estritamente para o Colaborador Responsável
 @router.get("/my-pending", response_model=List[FeedbackRequestOut])
 def get_my_pending_feedback_requests(
     db: Session = Depends(get_db),
@@ -105,7 +98,6 @@ def get_my_pending_feedback_requests(
 
     return result
 
-# 3. Submeter Resposta ao Feedback
 @router.post("/requests/{request_id}/respond", status_code=status.HTTP_201_CREATED)
 def submit_feedback_response(
     request_id: int,
@@ -144,16 +136,11 @@ def submit_feedback_response(
     db.commit()
     return {"message": "Feedback submetido com sucesso!"}
 
-# 4. Listar Todos os Feedbacks com Respostas (Painel de Gestão)
 @router.get("/summary", response_model=List[FeedbackRequestOut])
 def get_feedback_summary(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(check_permission("can_approve_reports"))
 ):
-    role = getattr(current_user, "role", "Member").lower()
-    if role not in ["admin", "manager", "gestor de operações"]:
-        raise HTTPException(status_code=403, detail="Acesso restrito.")
-
     requests = db.query(FeedbackRequest).order_by(FeedbackRequest.created_at.desc()).all()
     result = []
 
@@ -192,7 +179,6 @@ def get_feedback_summary(
 
     return result
 
-# 5. Listar Pedidos de Feedback filtrados por Tarefa (ticket_id)
 @router.get("/requests", response_model=List[FeedbackRequestOut])
 def get_feedback_requests_by_ticket(
     ticket_id: int = Query(None),
@@ -246,7 +232,6 @@ def get_feedback_requests_by_ticket(
 
     return result
 
-# 6. Rotina de Aviso Prévio (30 minutos antes do prazo)
 @router.post("/check-reminders")
 def check_feedback_reminders(db: Session = Depends(get_db)):
     now = datetime.utcnow()
@@ -281,25 +266,16 @@ def check_feedback_reminders(db: Session = Depends(get_db)):
     db.commit()
     return {"reminders_sent": notified_count}
 
-
-# 7. Cancelar / Desativar Pedido de Feedback Cíclico
 @router.patch("/requests/{request_id}/cancel", status_code=status.HTTP_200_OK)
 def cancel_feedback_request(
     request_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(check_permission("can_delete_records"))
 ):
-    role = getattr(current_user, "role", "Member").lower()
-    if role not in ["admin", "manager", "gestor de operações"]:
-        raise HTTPException(status_code=403, detail="Apenas gestores podem cancelar pedidos de feedback.")
-
     req = db.query(FeedbackRequest).filter(FeedbackRequest.id == request_id).first()
     if not req:
         raise HTTPException(status_code=404, detail="Pedido de feedback não encontrado.")
 
-    # Podes adicionar uma coluna 'is_active' na tabela ou simplesmente alterar o deadline para o passado/marcar como cancelado
-    # Vamos assumir que crias ou usas um campo de estado, ou atualizamos o tipo/prazo para expirar.
-    # A forma mais limpa é adicionar um campo boolean 'is_active' na tabela FeedbackRequest.
     req.is_active = False
     db.commit()
 

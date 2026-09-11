@@ -10,7 +10,7 @@ from models.project import Project
 from models.team import Team
 from models.audit_log import AuditLog
 from schemas.ticket import TicketCreate, TicketUpdate, TicketResponse
-from core.security import get_current_user
+from core.security import get_current_user, check_permission
 from typing import List, Optional
 from datetime import date, timedelta, datetime
 import shutil
@@ -258,12 +258,10 @@ def get_project_tickets(
 def create_ticket(
     ticket: TicketCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(check_permission("can_create_tasks"))
 ):
-    # Horas estimadas já não são obrigatórias (assume 0.0 se venham vazias)
     est_hours = ticket.estimated_hours if ticket.estimated_hours is not None else 0.0
 
-    # Todos os cargos podem definir livremente o responsável e a equipa atribuída
     assigned_id = ticket.assigned_to_id if ticket.assigned_to_id else None
     team_assigned_id = getattr(ticket, 'team_id', None)
     proj_id = ticket.project_id if ticket.project_id else None
@@ -552,7 +550,7 @@ def update_ticket(
 def delete_ticket(
     ticket_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(check_permission("can_delete_records"))
 ):
     query = db.query(Ticket).filter(Ticket.id == ticket_id)
     query = filter_tickets_by_permissions(query, current_user, db)
@@ -570,7 +568,7 @@ def delete_ticket(
 def generate_ai_report(
     ticket_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(check_permission("can_use_ai"))
 ):
     query = db.query(Ticket).filter(Ticket.id == ticket_id)
     query = filter_tickets_by_permissions(query, current_user, db)
@@ -589,7 +587,7 @@ def generate_ai_report(
     
     prompt = f"""
     És um assistente inteligente para técnicos de campo da empresa RFS. 
-    Com base nos dados desta tarefa e nas observações de campo registadas, redige um resumo profissional e um relatório detalhado de intervenção em língua portuguesa.
+    Com base nos dados desta tarefa e nas observações de campo registadas, redige um profissional resumo e um relatório detalhado de intervenção em língua portuguesa.
     
     Título da Tarefa: {ticket.title}
     Descrição Inicial: {ticket.description or 'N/A'}
@@ -618,7 +616,7 @@ def generate_ai_report(
 @router.get("/ai-focus-recommendation")
 def get_ai_focus_recommendation(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(check_permission("can_use_ai"))
 ):
     query = db.query(Ticket).filter(Ticket.is_hidden_from_active == False)
     query = filter_tickets_by_permissions(query, current_user, db)
@@ -698,7 +696,7 @@ def get_ai_focus_recommendation(
 def start_timer(
     ticket_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(check_permission("can_use_timers"))
 ):
     query = db.query(Ticket).filter(Ticket.id == ticket_id)
     query = filter_tickets_by_permissions(query, current_user, db)
@@ -741,7 +739,7 @@ def stop_timer(
     ticket_id: int,
     timer_data: dict, 
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(check_permission("can_use_timers"))
 ):
     ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
     if not ticket:
@@ -884,12 +882,8 @@ def check_and_create_deadline_notifications(user: User, db: Session):
 def send_missing_report_reminder(
     reminder_data: dict,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(check_permission("can_approve_reports"))
 ):
-    role = getattr(current_user, "role", "Member")
-    if role not in ["Admin", "Manager", "gestor de operações"]:
-        raise HTTPException(status_code=403, detail="Acesso restrito.")
-
     target_user_id = reminder_data.get("user_id")
     target_date = reminder_data.get("date")
 
@@ -911,7 +905,7 @@ def send_missing_report_reminder(
     return {"success": True, "message": f"Notificação enviada com sucesso para {target_user.name or target_user.email}!"}
 
 @router.post("/my-day/generate-ai")
-def generate_daily_ai_report(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def generate_daily_ai_report(db: Session = Depends(get_db), current_user: User = Depends(check_permission("can_use_ai"))):
     today = date.today()
     logs = db.query(TimeLog).filter(TimeLog.user_id == current_user.id, TimeLog.date == today).all()
     
@@ -1033,13 +1027,8 @@ def update_report_status_admin(
     report_id: int,
     status_data: dict,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(check_permission("can_approve_reports"))
 ):
-    role = getattr(current_user, "role", "Member")
-    
-    if role not in ["Admin", "Manager", "gestor de operações"]:
-        raise HTTPException(status_code=403, detail="Acesso restrito. Apenas Admins e Managers podem aprovar relatórios.")
-        
     report = db.query(DailyReport).filter(DailyReport.id == report_id).first()
     if not report:
         raise HTTPException(status_code=404, detail="Relatório não encontrado.")
@@ -1280,7 +1269,7 @@ def export_daily_report_word(
 @router.put("/{ticket_id}/grab", response_model=TicketResponse)
 def grab_ticket(
     ticket_id: int,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(check_permission("can_assign_teams")),
     db: Session = Depends(get_db)
 ):
     ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
@@ -1334,7 +1323,7 @@ def get_subtasks(ticket_id: int, db: Session = Depends(get_db), current_user: Us
     ]
 
 @router.post("/{ticket_id}/subtasks")
-def create_subtask(ticket_id: int, data: dict, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def create_subtask(ticket_id: int, data: dict, db: Session = Depends(get_db), current_user: User = Depends(check_permission("can_create_tasks"))):
     title = data.get("title")
     assigned_to_id = data.get("assigned_to_id")
     if not title or title.strip() == "":
@@ -1396,16 +1385,12 @@ def submit_subtask_for_approval(subtask_id: int, db: Session = Depends(get_db), 
     return {"message": "Subtarefa enviada para aprovação com sucesso!", "subtask_id": sub.id, "status": sub.status}
 
 @router.put("/subtasks/{subtask_id}/approve")
-def approve_subtask(subtask_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def approve_subtask(subtask_id: int, db: Session = Depends(get_db), current_user: User = Depends(check_permission("can_approve_reports"))):
     sub = db.query(SubTask).filter(SubTask.id == subtask_id).first()
     if not sub:
         raise HTTPException(status_code=404, detail="Subtarefa não encontrada.")
         
     ticket = db.query(Ticket).filter(Ticket.id == sub.ticket_id).first()
-    role = getattr(current_user, "role", "Member").lower()
-    
-    if role not in ["admin", "manager", "gestor de operações", "gestor de projeto", "gestor de projetos"] and ticket.creator_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Apenas o criador da tarefa ou gestores podem aprovar subtarefas.")
         
     sub.status = "Aprovada"
     sub.is_completed = True
@@ -1423,7 +1408,7 @@ def approve_subtask(subtask_id: int, db: Session = Depends(get_db), current_user
     return {"message": "Subtarefa aprovada com sucesso!", "subtask_id": sub.id, "status": sub.status}
 
 @router.put("/subtasks/{subtask_id}/reject")
-def reject_subtask(subtask_id: int, data: dict, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def reject_subtask(subtask_id: int, data: dict, db: Session = Depends(get_db), current_user: User = Depends(check_permission("can_approve_reports"))):
     sub = db.query(SubTask).filter(SubTask.id == subtask_id).first()
     if not sub:
         raise HTTPException(status_code=404, detail="Subtarefa não encontrada.")
@@ -1433,10 +1418,6 @@ def reject_subtask(subtask_id: int, data: dict, db: Session = Depends(get_db), c
         raise HTTPException(status_code=400, detail="É obrigatório indicar o motivo da recusa.")
         
     ticket = db.query(Ticket).filter(Ticket.id == sub.ticket_id).first()
-    role = getattr(current_user, "role", "Member").lower()
-    
-    if role not in ["admin", "manager", "gestor de operações", "gestor de projeto", "gestor de projetos"] and ticket.creator_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Apenas o criador da tarefa ou gestores podem recusar subtarefas.")
         
     sub.status = "Pendente"
     sub.is_completed = False
@@ -1496,8 +1477,8 @@ def update_subtask(subtask_id: int, data: dict, db: Session = Depends(get_db), c
     }
 
 @router.delete("/subtasks/{subtask_id}", status_code=204)
-def delete_subtask(subtask_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    sub = db.query(SubTask).filter(SubTask.id == subtask_id).form() if hasattr(db.query(SubTask).filter(SubTask.id == subtask_id), 'form') else db.query(SubTask).filter(SubTask.id == subtask_id).first()
+def delete_subtask(subtask_id: int, db: Session = Depends(get_db), current_user: User = Depends(check_permission("can_delete_records"))):
+    sub = db.query(SubTask).filter(SubTask.id == subtask_id).first()
     if not sub:
         raise HTTPException(status_code=404, detail="Subtarefa não encontrada.")
         
@@ -1523,12 +1504,8 @@ def get_global_task_types(
 def create_global_task_type(
     task_type: TaskTypeCreateSchema,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(check_permission("can_create_tasks"))
 ):
-    role = getattr(current_user, "role", "Member")
-    if role not in ["Admin", "Manager", "gestor de operações"]:
-        raise HTTPException(status_code=403, detail="Apenas Managers ou Admins podem criar tipos de tarefa.")
-    
     normalized_name = task_type.name.strip().capitalize()
     
     existing = db.query(TaskType).filter(TaskType.name == normalized_name).first()
@@ -1545,12 +1522,8 @@ def create_global_task_type(
 def delete_global_task_type(
     type_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(check_permission("can_delete_records"))
 ):
-    role = getattr(current_user, "role", "Member")
-    if role not in ["Admin", "Manager", "gestor de operações"]:
-        raise HTTPException(status_code=403, detail="Apenas Managers ou Admins podem apagar tipos de tarefa.")
-        
     db_type = db.query(TaskType).filter(TaskType.id == type_id).first()
     if not db_type:
         raise HTTPException(status_code=404, detail="Tipo de tarefa não encontrado.")
@@ -1562,12 +1535,8 @@ def delete_global_task_type(
 @router.get("/admin/reports/users-status")
 def get_admin_users_reports_status(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(check_permission("can_approve_reports"))
 ):
-    role = getattr(current_user, "role", "Member")
-    if role not in ["Admin", "Manager", "gestor de operações"]:
-        raise HTTPException(status_code=403, detail="Acesso negado.")
-
     users = db.query(User).all()
     result = []
     
@@ -1646,7 +1615,7 @@ def return_ticket(
 @router.post("/{ticket_id}/grab-team-task", response_model=TicketResponse)
 def grab_team_task(
     ticket_id: int,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(check_permission("can_assign_teams")),
     db: Session = Depends(get_db)
 ):
     ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()

@@ -4,7 +4,7 @@ from database import get_db
 from models.user import User
 from schemas.user import UserCreate, UserUpdate, UserResponse
 from passlib.context import CryptContext
-from routers.auth import get_current_user  
+from core.security import get_current_user, check_permission, verify_dynamic_permission  
 
 # config das encriptações das pass
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -15,7 +15,11 @@ router = APIRouter(
 )
 
 @router.post("/", response_model=UserResponse)
-def create_user(user: UserCreate, db: Session = Depends(get_db)):
+def create_user(
+    user: UserCreate, 
+    db: Session = Depends(get_db),
+    current_user: User = Depends(check_permission("can_assign_teams"))
+):
     existing_user = db.query(User).filter(User.email == user.email).first()
     if existing_user:
         raise HTTPException(status_code=400, detail="Este email já está registado!")
@@ -45,9 +49,10 @@ def update_user(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    # Verificar permissões: Apenas o próprio utilizador ou um Admin podem alterar
-    role = getattr(current_user, "role", "Member")
-    if current_user.id != user_id and role != "Admin":
+    # Verificar permissões dinamicamente: Próprio utilizador ou cargo com permissão de gestão/eliminação
+    has_mgmt_perm = verify_dynamic_permission(db, current_user, "can_delete_records")
+    
+    if current_user.id != user_id and not has_mgmt_perm:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Não tens permissões para alterar este utilizador."
@@ -59,10 +64,7 @@ def update_user(
     
     update_data = user_update.model_dump(exclude_unset=True)
     
-    # Se houver tentativa de alterar a password
     if "password" in update_data and update_data["password"]:
-        # Se for o próprio utilizador a alterar, exigimos a confirmação da password atual
-        # (podes adaptar caso o UserUpdate inclua um campo current_password)
         current_password = update_data.pop("current_password", None)
         
         if current_user.id == user_id:
@@ -86,16 +88,8 @@ def update_user(
 def delete_user(
     user_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(check_permission("can_delete_records"))
 ):
-    role = getattr(current_user, "role", "Member")
-    
-    if role != "Admin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Apenas Administradores podem apagar contas."
-        )
-        
     if current_user.id == user_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

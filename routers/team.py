@@ -7,7 +7,7 @@ from models.project import Project
 from models.notification import Notification
 from models.chat import ChatRoom, RoomMember
 from schemas.team import TeamCreate, TeamResponse, TeamUpdate
-from core.security import require_manager_or_admin, get_current_user
+from core.security import check_permission, get_current_user
 from typing import List
 from routers.project import sync_project_chat_members  # <-- Importado para sincronizar o chat geral
 
@@ -54,7 +54,7 @@ def sync_team_removal_from_project_chats(team_id: int, remaining_member_ids: lis
 def create_team(
     team: TeamCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_manager_or_admin)
+    current_user: User = Depends(check_permission("can_assign_teams"))
 ):
     owner_id = team.owner_id if team.owner_id else current_user.id
     
@@ -101,7 +101,7 @@ def update_team(
     team_id: int,
     team_update: TeamUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_manager_or_admin)
+    current_user: User = Depends(check_permission("can_assign_teams"))
 ):
     team = db.query(Team).filter(Team.id == team_id).first()
     if not team:
@@ -140,7 +140,7 @@ def update_team(
         db=db
     )
 
-    # NOVO: Atualiza e sincroniza também os chats gerais dos projetos associados a esta equipa para meter lá os novos membros
+    # Atualiza e sincroniza também os chats gerais dos projetos associados a esta equipa para meter lá os novos membros
     affected_projects = db.query(Project).filter(
         (Project.teams.any(Team.id == team_id)) |
         (Project.team_id == team_id)
@@ -167,7 +167,7 @@ def update_team(
 def delete_team(
     team_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_manager_or_admin)
+    current_user: User = Depends(check_permission("can_delete_records"))
 ):
     team = db.query(Team).filter(Team.id == team_id).first()
     if not team:

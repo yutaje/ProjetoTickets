@@ -12,6 +12,7 @@ import json
 from datetime import datetime
 import os
 from google import genai
+from core.security import check_permission, verify_dynamic_permission
 
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
@@ -24,7 +25,6 @@ def get_project_member_ids(project_id: int, db: Session) -> list[int]:
         
     team_ids = []
     
-    # 1. Obter equipas ligadas ao projeto
     if getattr(project, "team_ids", None) and isinstance(project.team_ids, list):
         team_ids.extend(project.team_ids)
     elif getattr(project, "team_id", None):
@@ -33,7 +33,6 @@ def get_project_member_ids(project_id: int, db: Session) -> list[int]:
     if getattr(project, "teams", None):
         team_ids.extend([t.id for t in project.teams if hasattr(t, "id")])
 
-    # 2. Obter projetos associados a partir da lista das equipas
     all_teams = db.query(Team).all()
     for t in all_teams:
         proj_ids = getattr(t, "project_ids", []) or []
@@ -43,7 +42,6 @@ def get_project_member_ids(project_id: int, db: Session) -> list[int]:
     team_ids = list(set(team_ids))
     member_ids = []
     
-    # 3. Adicionar membros e líderes das equipas
     if team_ids:
         matched_teams = db.query(Team).filter(Team.id.in_(team_ids)).all()
         for t in matched_teams:
@@ -62,19 +60,16 @@ def get_project_member_ids(project_id: int, db: Session) -> list[int]:
                     if hasattr(u, "id"):
                         member_ids.append(u.id)
 
-    # 4. Adicionar Gestor do Projeto
     manager_id = getattr(project, "manager_id", None) or getattr(project, "project_manager_id", None)
     if manager_id:
         member_ids.append(manager_id)
 
-    # 5. Adicionar Administradores e Gestores globais com acesso geral
-    admins_managers = db.query(User).filter(
-        func.lower(User.role).in_(["admin", "gestor de operações", "manager"])
-    ).all()
-    for adm in admins_managers:
-        member_ids.append(adm.id)
+    # Utilizadores com permissão de aprovação ou gestão global
+    all_users = db.query(User).all()
+    for u in all_users:
+        if verify_dynamic_permission(db, u, "can_approve_reports"):
+            member_ids.append(u.id)
 
-    # 6. Limpar duplicados e validar IDs existentes
     if member_ids:
         valid_users = db.query(User.id).filter(User.id.in_(member_ids)).all()
         return [u[0] for u in valid_users]
@@ -89,7 +84,7 @@ def get_user_rooms(
     db: Session = Depends(get_db)
 ):
     user = db.query(User).filter(User.id == user_id).first()
-    is_admin_or_manager = user and ((user.role or "").lower() in ["admin", "gestor de operações", "manager"])
+    is_admin_or_manager = user and verify_dynamic_permission(db, user, "can_approve_reports")
 
     query = db.query(ChatRoom)
 
@@ -100,7 +95,6 @@ def get_user_rooms(
             query = query.filter(ChatRoom.project_id.isnot(None))
 
         if not is_admin_or_manager:
-            # Correção do warning convertendo os IDs de salas do utilizador para uma lista Python
             user_room_ids = [r[0] for r in db.query(RoomMember.room_id).filter(RoomMember.user_id == user_id).all()]
             query = query.filter(
                 or_(
@@ -365,7 +359,6 @@ async def chat_websocket(websocket: WebSocket, room_id: int, user_id: int, db: S
 
 @router.get("/unread-count")
 def get_unread_count(user_id: int, db: Session = Depends(get_db)):
-    # Correção do warning convertendo os IDs de salas do utilizador para uma lista Python
     user_room_ids = [r[0] for r in db.query(RoomMember.room_id).filter(RoomMember.user_id == user_id).all()]
     
     if not user_room_ids:

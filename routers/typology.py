@@ -1,7 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from database import get_db
 from models.typology import Typology
+from models.user import User
+from core.security import check_permission
 
 router = APIRouter(prefix="/typologies", tags=["Tipologias"])
 
@@ -10,7 +12,11 @@ def get_typologies(db: Session = Depends(get_db)):
     return db.query(Typology).filter(Typology.is_active == True).all()
 
 @router.post("/")
-def create_typology(data: dict, db: Session = Depends(get_db)):
+def create_typology(
+    data: dict, 
+    db: Session = Depends(get_db),
+    current_user: User = Depends(check_permission("can_create_tasks"))
+):
     name = data.get("name")
     if not name:
         raise HTTPException(status_code=400, detail="O nome da tipologia é obrigatório.")
